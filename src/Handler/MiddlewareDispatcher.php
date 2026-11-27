@@ -10,72 +10,62 @@ use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
 
 /**
- * PSR-15 middleware dispatcher (onion model).
+ * A PSR-15 request handler that runs a queue of middleware in front of a
+ * fallback handler. The first middleware piped is the outermost: it sees
+ * the request first and the response last. Each middleware either returns
+ * a response itself or passes the request to the next one through the
+ * handler it receives.
  *
- * ARFA 1.3 P2 (Reactive Flow Composition): middleware forms
- * a composable pipeline where each layer wraps the next handler.
- * The stack builds inside-out so the first piped middleware is
- * the outermost layer (first to process request, last to see response).
+ * ARFA 1.3: P2 (reactive flow: the request through the queue, the response
+ * back out). Spec V4.3.3: final; the queue grows only through pipe().
  *
- * The final handler produces the base response when no middleware
- * short-circuits. Anonymous handler classes are used to avoid
- * allocating named classes for a single-purpose adapter.
- * Spec V4.0: final class, no inheritance.
+ * Preconditions: middleware is piped before handle() runs.
  *
- * @see https://www.php-fig.org/psr/psr-15/ PSR-15 HTTP Server Request Handlers
+ * Thread-safety: handle() keeps no state between calls; pipe() changes the
+ * queue, so build it once, at bootstrap.
+ *
+ * Side effects: those of the middleware and the fallback.
+ *
+ * Example:
+ *
+ *     $app = (new MiddlewareDispatcher($router))
+ *         ->pipe(new CorsMiddleware($cors))      // outermost
+ *         ->pipe(new TrailingSlashMiddleware());
+ *     $response = $app->handle($request);
+ *
+ * References: PSR-15 HTTP Server Request Handlers; ADR-002.
+ *
+ * @see https://www.php-fig.org/psr/psr-15/
  */
 final class MiddlewareDispatcher implements RequestHandlerInterface
 {
     /** @var list<MiddlewareInterface> */
-    private array $stack = [];
+    private array $queue = [];
 
     public function __construct(
         private readonly RequestHandlerInterface $fallback,
-    ) {
-    }
+    ) {}
 
-    public function pipe(MiddlewareInterface $middleware): self
+    public function pipe(MiddlewareInterface ...$middleware): self
     {
-        $this->stack[] = $middleware;
+        foreach ($middleware as $item) {
+            $this->queue[] = $item;
+        }
 
         return $this;
     }
 
     /**
-     * @param list<MiddlewareInterface> $middlewares
-      *
-      * @see https://www.php-fig.org/psr/psr-15/ PSR-15 HTTP Server Request Handlers
+     * @param list<MiddlewareInterface> $middleware
      */
-    public function pipeAll(array $middlewares): self
+    public function pipeAll(array $middleware): self
     {
-        foreach ($middlewares as $middleware) {
-            $this->stack[] = $middleware;
-        }
-
-        return $this;
+        return $this->pipe(...$middleware);
     }
 
+    #[\Override]
     public function handle(ServerRequestInterface $request): ResponseInterface
     {
-        $handler = $this->fallback;
-
-        // Build from inside-out: last piped = outermost
-        foreach (array_reverse($this->stack) as $middleware) {
-            $handler = new class ($middleware, $handler) implements RequestHandlerInterface {
-                public function __construct(
-                    private readonly MiddlewareInterface $middleware,
-                    private readonly RequestHandlerInterface $next,
-                ) {
-                }
-
-                public function handle(ServerRequestInterface $request): ResponseInterface
-                {
-                    return $this->middleware->process($request, $this->next);
-                }
-            };
-        }
-
-        return $handler->handle($request);
+        return (new MiddlewareStep($this->queue, $this->fallback))->handle($request);
     }
 }
-

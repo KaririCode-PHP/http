@@ -4,77 +4,73 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Message;
 
+use KaririCode\Http\Exception\InvalidMessageException;
+use KaririCode\Http\Exception\StreamException;
 use Psr\Http\Message\StreamInterface;
 
 /**
- * PSR-7 stream wrapper around a PHP resource.
+ * A PHP stream behind PSR-7's StreamInterface. Readable and writable come
+ * from the mode the resource was opened with, read as PHP reads it: the
+ * first letter ("r" reads; "w", "a", "x" or "c" writes) and "+" for both,
+ * so every mode PHP accepts is classified, "rw" (read-only) included. The stream owns its resource: close(),
+ * and the destructor, close it; detach() hands it back to the caller.
  *
- * Implements lazy reading and deferred resource acquisition.
- * Not immutable — streams are inherently stateful per PSR-7 §1.3.
- * This is the only PSR-7 type exempt from ARFA 1.3 P1 immutability.
+ * ARFA 1.3: P2 (the byte stage of a message). Spec V4.3.3: final PSR-7
+ * adapter; the getX() methods and __toString() are the PSR-7 contract.
  *
- * Read/write mode lookup tables use hash maps for O(1) detection,
- * covering all POSIX fopen mode combinations including binary/text.
- * Spec V4.0 exemption: mutable by PSR-7 requirement (resource wrapper).
+ * Preconditions: the constructor receives an open stream resource
+ * (InvalidMessageException 1710). Operations on a detached stream, or
+ * ones the mode does not allow, throw StreamException (1730 to 1734).
  *
- * @see https://www.php-fig.org/psr/psr-7/#35-psrhttpmessagestreaminterface PSR-7 Stream
+ * Thread-safety: holds a resource; use it from one fiber at a time.
+ *
+ * Side effects: reads, writes and seeks move the resource's position;
+ * close() and the destructor close the resource.
+ *
+ * Example:
+ *
+ *     $body = Stream::fromString('{"ok":true}');
+ *     $body->getContents();   // '{"ok":true}'
+ *
+ * References: PSR-7 StreamInterface; PHP manual, fopen() modes; ADR-001.
+ *
+ * @see https://www.php.net/manual/en/function.fopen.php
  */
 final class Stream implements StreamInterface
 {
     /** @var resource|null */
-    private $resource;
+    private mixed $resource;
 
     private ?int $size = null;
 
     private bool $seekable;
+
     private bool $readable;
+
     private bool $writable;
 
-    private const READ_MODES = [
-        'r' => true, 'r+' => true, 'w+' => true, 'a+' => true,
-        'x+' => true, 'c+' => true, 'rb' => true, 'r+b' => true,
-        'w+b' => true, 'a+b' => true, 'x+b' => true, 'c+b' => true,
-        'rt' => true, 'r+t' => true, 'w+t' => true, 'a+t' => true,
-        'x+t' => true, 'c+t' => true,
-    ];
-
-    private const WRITE_MODES = [
-        'w' => true, 'w+' => true, 'r+' => true, 'a' => true,
-        'a+' => true, 'x' => true, 'x+' => true, 'c' => true,
-        'c+' => true, 'wb' => true, 'w+b' => true, 'r+b' => true,
-        'ab' => true, 'a+b' => true, 'xb' => true, 'x+b' => true,
-        'cb' => true, 'c+b' => true, 'wt' => true, 'w+t' => true,
-        'r+t' => true, 'at' => true, 'a+t' => true, 'xt' => true,
-        'x+t' => true, 'ct' => true, 'c+t' => true,
-    ];
-
-    /**
-     * @param resource $resource PHP stream resource
-      *
-      * @see https://www.php-fig.org/psr/psr-7/#35-psrhttpmessagestreaminterface PSR-7 Stream
-     */
-    public function __construct($resource)
+    public function __construct(mixed $resource)
     {
-        if (!is_resource($resource)) {
-            throw new \InvalidArgumentException('Expected a stream resource');
+        if (!is_resource($resource) || get_resource_type($resource) !== 'stream') {
+            throw InvalidMessageException::notAStreamResource();
         }
 
-        $this->resource = $resource;
         $meta = stream_get_meta_data($resource);
-        $mode = $meta['mode'];
-
+        $both = str_contains($meta['mode'], '+');
+        $access = substr($meta['mode'], 0, 1);
+        $this->resource = $resource;
         $this->seekable = $meta['seekable'];
-        $this->readable = isset(self::READ_MODES[$mode]);
-        $this->writable = isset(self::WRITE_MODES[$mode]);
+        $this->readable = $both || $access === 'r';
+        $this->writable = $both || in_array($access, ['w', 'a', 'x', 'c'], true);
     }
 
     public static function fromString(string $content): self
     {
-        $resource = fopen('php://temp', 'r+');
-        fwrite($resource, $content);
-        rewind($resource);
+        $stream = self::empty();
+        $stream->write($content);
+        $stream->rewind();
 
-        return new self($resource);
+        return $stream;
     }
 
     public static function empty(): self
@@ -82,32 +78,40 @@ final class Stream implements StreamInterface
         return new self(fopen('php://temp', 'r+'));
     }
 
+    public function __destruct()
+    {
+        $this->close();
+    }
+
+    /** The whole stream from the start; '' when it cannot be read (PSR-7 §3.4). */
+    #[\Override]
     public function __toString(): string
     {
-        if ($this->resource === null) {
-            return '';
-        }
-
         try {
-            if ($this->isSeekable()) {
+            if ($this->seekable) {
                 $this->rewind();
             }
+
             return $this->getContents();
-        } catch (\Throwable) {
+        } catch (StreamException) {
             return '';
         }
     }
 
+    #[\Override]
     public function close(): void
     {
-        if ($this->resource !== null) {
-            $resource = $this->detach();
-            if (is_resource($resource)) {
-                fclose($resource);
-            }
+        $resource = $this->detach();
+
+        if (is_resource($resource)) {
+            fclose($resource);
         }
     }
 
+    /**
+     * @return resource|null
+     */
+    #[\Override]
     public function detach()
     {
         $resource = $this->resource;
@@ -120,124 +124,126 @@ final class Stream implements StreamInterface
         return $resource;
     }
 
+    #[\Override]
     public function getSize(): ?int
     {
         if ($this->resource === null) {
             return null;
         }
 
-        if ($this->size !== null) {
-            return $this->size;
+        if ($this->size === null) {
+            $stats = fstat($this->resource);
+            $this->size = $stats === false ? null : $stats['size'];
         }
-
-        $stats = fstat($this->resource);
-        $this->size = $stats['size'] ?? null;
 
         return $this->size;
     }
 
+    #[\Override]
     public function tell(): int
     {
-        $this->assertAttached();
+        $position = ftell($this->attached());
 
-        $position = ftell($this->resource);
-        if ($position === false) {
-            throw new \RuntimeException('Unable to determine stream position');
-        }
-
-        return $position;
+        return $position === false ? throw StreamException::operationFailed('tell') : $position;
     }
 
+    #[\Override]
     public function eof(): bool
     {
         return $this->resource === null || feof($this->resource);
     }
 
+    #[\Override]
     public function isSeekable(): bool
     {
         return $this->seekable;
     }
 
+    #[\Override]
     public function seek(int $offset, int $whence = SEEK_SET): void
     {
-        $this->assertAttached();
+        $resource = $this->attached();
 
         if (!$this->seekable) {
-            throw new \RuntimeException('Stream is not seekable');
+            throw StreamException::notSeekable();
         }
 
-        if (fseek($this->resource, $offset, $whence) === -1) {
-            throw new \RuntimeException("Unable to seek to position {$offset}");
+        if (fseek($resource, $offset, $whence) === -1) {
+            throw StreamException::operationFailed('seek');
         }
-
-        $this->size = null;
     }
 
+    #[\Override]
     public function rewind(): void
     {
         $this->seek(0);
     }
 
+    #[\Override]
     public function isWritable(): bool
     {
         return $this->writable;
     }
 
+    #[\Override]
     public function write(string $string): int
     {
-        $this->assertAttached();
+        $resource = $this->attached();
 
         if (!$this->writable) {
-            throw new \RuntimeException('Stream is not writable');
-        }
-
-        $bytes = fwrite($this->resource, $string);
-        if ($bytes === false) {
-            throw new \RuntimeException('Unable to write to stream');
+            throw StreamException::notWritable();
         }
 
         $this->size = null;
+        $written = Silently::run(static fn(): int|false => fwrite($resource, $string));
 
-        return $bytes;
+        return $written === false ? throw StreamException::operationFailed('write') : $written;
     }
 
+    #[\Override]
     public function isReadable(): bool
     {
         return $this->readable;
     }
 
+    /** Up to $length bytes; '' for a length of 0. */
+    #[\Override]
     public function read(int $length): string
     {
-        $this->assertAttached();
+        $resource = $this->attached();
 
         if (!$this->readable) {
-            throw new \RuntimeException('Stream is not readable');
+            throw StreamException::notReadable();
         }
 
-        $data = fread($this->resource, $length);
-        if ($data === false) {
-            throw new \RuntimeException('Unable to read from stream');
+        if ($length < 0) {
+            throw StreamException::operationFailed('read');
         }
 
-        return $data;
+        if ($length === 0) {
+            return '';
+        }
+
+        $data = Silently::run(static fn(): string|false => fread($resource, $length));
+
+        return $data === false ? throw StreamException::operationFailed('read') : $data;
     }
 
+    #[\Override]
     public function getContents(): string
     {
-        $this->assertAttached();
+        $resource = $this->attached();
 
         if (!$this->readable) {
-            throw new \RuntimeException('Stream is not readable');
+            throw StreamException::notReadable();
         }
 
-        $contents = stream_get_contents($this->resource);
-        if ($contents === false) {
-            throw new \RuntimeException('Unable to read stream contents');
-        }
+        $contents = stream_get_contents($resource);
 
-        return $contents;
+        return $contents === false ? throw StreamException::operationFailed('getContents') : $contents;
     }
 
+    #[\Override]
     public function getMetadata(?string $key = null): mixed
     {
         if ($this->resource === null) {
@@ -249,16 +255,11 @@ final class Stream implements StreamInterface
         return $key === null ? $meta : ($meta[$key] ?? null);
     }
 
-    public function __destruct()
+    /**
+     * @return resource
+     */
+    private function attached(): mixed
     {
-        $this->close();
-    }
-
-    private function assertAttached(): void
-    {
-        if ($this->resource === null) {
-            throw new \RuntimeException('Stream is detached');
-        }
+        return $this->resource ?? throw StreamException::detached();
     }
 }
-

@@ -4,45 +4,56 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Integration;
 
+use KaririCode\Http\Exception\InvalidMessageException;
 use KaririCode\Router\Contract\RequestNormalizer;
 use KaririCode\Router\Core\NormalizedRequest;
 use Psr\Http\Message\ServerRequestInterface;
 
 /**
- * Bridges PSR-7 ServerRequest into the Router's string-based matching.
+ * Lets kariricode/router match PSR-7 server requests: the method and the
+ * path become the two strings the router matches on, and the request
+ * travels along in NormalizedRequest. The method is upper-cased, as the
+ * router's contract asks and as it stores the methods of its routes; an
+ * empty path is "/".
  *
- * ARFA 1.3 P4 (Protocol Agnosticism): implements the
- * {@see RequestNormalizer} contract from kariricode/router. This class
- * lives in kariricode/http (not in Router) so the Router package has
- * zero knowledge of PSR-7 or any HTTP types.
+ * ARFA 1.3: P4 (protocol agnosticism: the router knows no PSR-7). Spec
+ * V4.3.3: final, stateless; the `object` parameters are the router's
+ * accepted deviation (kariricode/router ADR-002).
  *
- * Dependency direction: Http → Router (never reversed).
- * Adding a new protocol (gRPC, WebSocket, MQTT) requires a new
- * normalizer in that protocol's package — zero changes here or
- * in the Router.
+ * Preconditions: normalize() is called for a request canNormalize()
+ * accepted; anything else throws InvalidMessageException 1711.
  *
- * @see \KaririCode\Router\Contract\RequestNormalizer
- * @see \KaririCode\Router\Core\NormalizedRequest
- * Spec V4.0: final class, zero state, pure transformation.
+ * Thread-safety: stateless; safe to share.
  *
- * @see https://www.php-fig.org/psr/psr-7/#33-psrhttpmessageserverrequestinterface PSR-7 ServerRequest
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     $normalized = (new HttpNormalizer())->normalize($request);
+ *     $result = $routes->match($normalized->method, $normalized->uri);
+ *
+ * References: kariricode/router RequestNormalizer and NormalizedRequest;
+ * ADR-002.
+ *
+ * @see https://www.php-fig.org/psr/psr-7/
  */
 final class HttpNormalizer implements RequestNormalizer
 {
+    #[\Override]
     public function canNormalize(object $request): bool
     {
         return $request instanceof ServerRequestInterface;
     }
 
+    #[\Override]
     public function normalize(object $request): NormalizedRequest
     {
-        assert($request instanceof ServerRequestInterface);
+        if (!$request instanceof ServerRequestInterface) {
+            throw InvalidMessageException::notAServerRequest();
+        }
 
-        return new NormalizedRequest(
-            method: strtoupper($request->getMethod()),
-            uri: $request->getUri()->getPath() ?: '/',
-            original: $request,
-        );
+        $path = $request->getUri()->getPath();
+
+        return new NormalizedRequest(method: strtoupper($request->getMethod()), uri: $path === '' ? '/' : $path, original: $request);
     }
 }
-

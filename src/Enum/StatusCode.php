@@ -5,153 +5,109 @@ declare(strict_types=1);
 namespace KaririCode\Http\Enum;
 
 /**
- * HTTP status codes per RFC 9110 §15.
+ * The HTTP status codes of RFC 9110 §15 and the IANA registry, with their
+ * reason phrases and classes (informational, success, redirection, client
+ * and server error). Phrases follow RFC 9110 where it renamed a status
+ * (413 Content Too Large, 422 Unprocessable Content); 418 keeps the phrase
+ * of RFC 2324, since RFC 9110 only reserves the code. The enum is backed by the code because the number is
+ * an external contract the registry fixes (errata E-003): tryFrom() and
+ * tryFromCode() find a status without a lookup table kept in static state.
  *
- * Pure enum — no backed values. Numeric codes and reason phrases
- * derived via match() to keep the enum closed for modification.
+ * ARFA 1.3: P1 (immutable cases). Spec V4.3.3: backed enum with a
+ * documented external contract (E-003).
  *
- * ARFA 1.3 P1 (Immutable State Transformation): pure enum with
- * no backed values.
+ * Preconditions: none.
  *
- * Spec V4.0: pure enum, static memoization for phrases() and
- * tryFromCode() lookups.
+ * Thread-safety: enum cases are immutable.
  *
- * @see https://www.iana.org/assignments/http-status-codes/ IANA HTTP Status Code Registry
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     StatusCode::NotFound->code();          // 404
+ *     StatusCode::tryFromCode(418)?->reasonPhrase(); // "I'm a teapot"
+ *
+ * References: RFC 9110 §15; RFC 2324 §2.3.2 (418); IANA HTTP Status Code
+ * Registry.
+ *
+ * @see https://www.iana.org/assignments/http-status-codes/
  */
-enum StatusCode
+enum StatusCode: int
 {
     // ── 1xx Informational ────────────────────────────────────────────────
-    case Continue;
-    case SwitchingProtocols;
-    case Processing;
-    case EarlyHints;
+    case Continue = 100;
+    case SwitchingProtocols = 101;
+    case Processing = 102;
+    case EarlyHints = 103;
 
     // ── 2xx Success ──────────────────────────────────────────────────────
-    case Ok;
-    case Created;
-    case Accepted;
-    case NonAuthoritativeInformation;
-    case NoContent;
-    case ResetContent;
-    case PartialContent;
-    case MultiStatus;
+    case Ok = 200;
+    case Created = 201;
+    case Accepted = 202;
+    case NonAuthoritativeInformation = 203;
+    case NoContent = 204;
+    case ResetContent = 205;
+    case PartialContent = 206;
+    case MultiStatus = 207;
+    case AlreadyReported = 208;
+    case ImUsed = 226;
 
     // ── 3xx Redirection ──────────────────────────────────────────────────
-    case MultipleChoices;
-    case MovedPermanently;
-    case Found;
-    case SeeOther;
-    case NotModified;
-    case TemporaryRedirect;
-    case PermanentRedirect;
+    case MultipleChoices = 300;
+    case MovedPermanently = 301;
+    case Found = 302;
+    case SeeOther = 303;
+    case NotModified = 304;
+    case TemporaryRedirect = 307;
+    case PermanentRedirect = 308;
 
     // ── 4xx Client Error ─────────────────────────────────────────────────
-    case BadRequest;
-    case Unauthorized;
-    case PaymentRequired;
-    case Forbidden;
-    case NotFound;
-    case MethodNotAllowed;
-    case NotAcceptable;
-    case ProxyAuthenticationRequired;
-    case RequestTimeout;
-    case Conflict;
-    case Gone;
-    case LengthRequired;
-    case PreconditionFailed;
-    case PayloadTooLarge;
-    case UriTooLong;
-    case UnsupportedMediaType;
-    case RangeNotSatisfiable;
-    case ExpectationFailed;
-    case ImATeapot;
-    case MisdirectedRequest;
-    case UnprocessableEntity;
-    case Locked;
-    case FailedDependency;
-    case TooEarly;
-    case UpgradeRequired;
-    case PreconditionRequired;
-    case TooManyRequests;
-    case RequestHeaderFieldsTooLarge;
-    case UnavailableForLegalReasons;
+    case BadRequest = 400;
+    case Unauthorized = 401;
+    case PaymentRequired = 402;
+    case Forbidden = 403;
+    case NotFound = 404;
+    case MethodNotAllowed = 405;
+    case NotAcceptable = 406;
+    case ProxyAuthenticationRequired = 407;
+    case RequestTimeout = 408;
+    case Conflict = 409;
+    case Gone = 410;
+    case LengthRequired = 411;
+    case PreconditionFailed = 412;
+    case ContentTooLarge = 413;
+    case UriTooLong = 414;
+    case UnsupportedMediaType = 415;
+    case RangeNotSatisfiable = 416;
+    case ExpectationFailed = 417;
+    case ImATeapot = 418;
+    case MisdirectedRequest = 421;
+    case UnprocessableContent = 422;
+    case Locked = 423;
+    case FailedDependency = 424;
+    case TooEarly = 425;
+    case UpgradeRequired = 426;
+    case PreconditionRequired = 428;
+    case TooManyRequests = 429;
+    case RequestHeaderFieldsTooLarge = 431;
+    case UnavailableForLegalReasons = 451;
 
     // ── 5xx Server Error ─────────────────────────────────────────────────
-    case InternalServerError;
-    case NotImplemented;
-    case BadGateway;
-    case ServiceUnavailable;
-    case GatewayTimeout;
-    case HttpVersionNotSupported;
-    case VariantAlsoNegotiates;
-    case InsufficientStorage;
-    case LoopDetected;
-    case NotExtended;
-    case NetworkAuthenticationRequired;
+    case InternalServerError = 500;
+    case NotImplemented = 501;
+    case BadGateway = 502;
+    case ServiceUnavailable = 503;
+    case GatewayTimeout = 504;
+    case HttpVersionNotSupported = 505;
+    case VariantAlsoNegotiates = 506;
+    case InsufficientStorage = 507;
+    case LoopDetected = 508;
+    case NotExtended = 510;
+    case NetworkAuthenticationRequired = 511;
 
     public function code(): int
     {
-        return match ($this) {
-            self::Continue => 100,
-            self::SwitchingProtocols => 101,
-            self::Processing => 102,
-            self::EarlyHints => 103,
-            self::Ok => 200,
-            self::Created => 201,
-            self::Accepted => 202,
-            self::NonAuthoritativeInformation => 203,
-            self::NoContent => 204,
-            self::ResetContent => 205,
-            self::PartialContent => 206,
-            self::MultiStatus => 207,
-            self::MultipleChoices => 300,
-            self::MovedPermanently => 301,
-            self::Found => 302,
-            self::SeeOther => 303,
-            self::NotModified => 304,
-            self::TemporaryRedirect => 307,
-            self::PermanentRedirect => 308,
-            self::BadRequest => 400,
-            self::Unauthorized => 401,
-            self::PaymentRequired => 402,
-            self::Forbidden => 403,
-            self::NotFound => 404,
-            self::MethodNotAllowed => 405,
-            self::NotAcceptable => 406,
-            self::ProxyAuthenticationRequired => 407,
-            self::RequestTimeout => 408,
-            self::Conflict => 409,
-            self::Gone => 410,
-            self::LengthRequired => 411,
-            self::PreconditionFailed => 412,
-            self::PayloadTooLarge => 413,
-            self::UriTooLong => 414,
-            self::UnsupportedMediaType => 415,
-            self::RangeNotSatisfiable => 416,
-            self::ExpectationFailed => 417,
-            self::ImATeapot => 418,
-            self::MisdirectedRequest => 421,
-            self::UnprocessableEntity => 422,
-            self::Locked => 423,
-            self::FailedDependency => 424,
-            self::TooEarly => 425,
-            self::UpgradeRequired => 426,
-            self::PreconditionRequired => 428,
-            self::TooManyRequests => 429,
-            self::RequestHeaderFieldsTooLarge => 431,
-            self::UnavailableForLegalReasons => 451,
-            self::InternalServerError => 500,
-            self::NotImplemented => 501,
-            self::BadGateway => 502,
-            self::ServiceUnavailable => 503,
-            self::GatewayTimeout => 504,
-            self::HttpVersionNotSupported => 505,
-            self::VariantAlsoNegotiates => 506,
-            self::InsufficientStorage => 507,
-            self::LoopDetected => 508,
-            self::NotExtended => 510,
-            self::NetworkAuthenticationRequired => 511,
-        };
+        return $this->value;
     }
 
     public function reasonPhrase(): string
@@ -169,6 +125,8 @@ enum StatusCode
             self::ResetContent => 'Reset Content',
             self::PartialContent => 'Partial Content',
             self::MultiStatus => 'Multi-Status',
+            self::AlreadyReported => 'Already Reported',
+            self::ImUsed => 'IM Used',
             self::MultipleChoices => 'Multiple Choices',
             self::MovedPermanently => 'Moved Permanently',
             self::Found => 'Found',
@@ -189,14 +147,14 @@ enum StatusCode
             self::Gone => 'Gone',
             self::LengthRequired => 'Length Required',
             self::PreconditionFailed => 'Precondition Failed',
-            self::PayloadTooLarge => 'Payload Too Large',
+            self::ContentTooLarge => 'Content Too Large',
             self::UriTooLong => 'URI Too Long',
             self::UnsupportedMediaType => 'Unsupported Media Type',
             self::RangeNotSatisfiable => 'Range Not Satisfiable',
             self::ExpectationFailed => 'Expectation Failed',
             self::ImATeapot => "I'm a teapot",
             self::MisdirectedRequest => 'Misdirected Request',
-            self::UnprocessableEntity => 'Unprocessable Entity',
+            self::UnprocessableContent => 'Unprocessable Content',
             self::Locked => 'Locked',
             self::FailedDependency => 'Failed Dependency',
             self::TooEarly => 'Too Early',
@@ -221,67 +179,46 @@ enum StatusCode
 
     public function isInformational(): bool
     {
-        $code = $this->code();
-        return $code >= 100 && $code < 200;
+        return intdiv($this->value, 100) === 1;
     }
 
     public function isSuccess(): bool
     {
-        $code = $this->code();
-        return $code >= 200 && $code < 300;
+        return intdiv($this->value, 100) === 2;
     }
 
     public function isRedirection(): bool
     {
-        $code = $this->code();
-        return $code >= 300 && $code < 400;
+        return intdiv($this->value, 100) === 3;
     }
 
     public function isClientError(): bool
     {
-        $code = $this->code();
-        return $code >= 400 && $code < 500;
+        return intdiv($this->value, 100) === 4;
     }
 
     public function isServerError(): bool
     {
-        $code = $this->code();
-        return $code >= 500 && $code < 600;
+        return intdiv($this->value, 100) === 5;
     }
 
     /**
-     * @return array<int, string> Code → reason phrase for all known statuses.
-      *
-      * @see https://www.iana.org/assignments/http-status-codes/ IANA HTTP Status Code Registry
+     * @return array<int, string> code => reason phrase, for every known status
      */
     public static function phrases(): array
     {
-        static $map = null;
+        $phrases = [];
 
-        return $map ??= array_reduce(
-            self::cases(),
-            static function (array $carry, self $case): array {
-                $carry[$case->code()] = $case->reasonPhrase();
-                return $carry;
-            },
-            [],
-        );
+        foreach (self::cases() as $case) {
+            $phrases[$case->value] = $case->reasonPhrase();
+        }
+
+        return $phrases;
     }
 
+    /** The status with this code, or null for a code the registry does not list. */
     public static function tryFromCode(int $code): ?self
     {
-        static $codeMap = null;
-
-        $codeMap ??= array_reduce(
-            self::cases(),
-            static function (array $carry, self $case): array {
-                $carry[$case->code()] = $case;
-                return $carry;
-            },
-            [],
-        );
-
-        return $codeMap[$code] ?? null;
+        return self::tryFrom($code);
     }
 }
-

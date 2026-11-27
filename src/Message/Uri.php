@@ -4,308 +4,264 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Message;
 
+use KaririCode\Http\Exception\InvalidUriException;
 use Psr\Http\Message\UriInterface;
 
 /**
- * RFC 3986 compliant URI value object.
+ * A URI (RFC 3986, PSR-7 UriInterface) held as checked components. The
+ * scheme and host are lower-cased; the scheme must follow RFC 3986 §3.1 and
+ * the host must be a registered name, an IPv4 address or a bracketed IP
+ * literal, so a value with "@", "/", "?" or "#" cannot move the authority
+ * somewhere else. User info, path, query and fragment are percent-encoded
+ * where they hold characters their component does not allow, without
+ * encoding an existing escape twice. A with*() call replaces one component
+ * and keeps the others as they are; nothing is parsed again.
  *
- * ARFA 1.3 P1: readonly class — all with* methods return new instances.
- * Components are normalized per RFC 3986 §6.2.2: scheme and host
- * lowercased, default ports (RFC 3986 §3.2.3) omitted from authority,
- * path/query/fragment percent-encoded for unreserved characters.
+ * ARFA 1.3: P1 (immutable; with*() returns a new URI). Spec V4.3.3: final
+ * PSR-7 value object; the getX() methods and __toString() are the PSR-7
+ * contract.
  *
- * @see https://datatracker.ietf.org/doc/html/rfc3986
- * Spec V4.0: final readonly class (PHP 8.4 readonly + PSR-7 immutability).
+ * Preconditions: the string is something parse_url() accepts
+ * (InvalidUriException 1720); components follow the rules above (1721 to
+ * 1723).
+ *
+ * Thread-safety: immutable; safe to share.
+ *
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     $uri = (new Uri('HTTPS://Example.com:443/a b?x=1#top'))->withPath('/docs');
+ *     (string) $uri;   // "https://example.com/docs?x=1#top"
+ *
+ * References: RFC 3986 §3 (components), §2.1 (percent-encoding), §6.2.2.1
+ * (case normalisation); PSR-7 UriInterface; ADR-005.
+ *
+ * @see https://www.rfc-editor.org/rfc/rfc3986#section-3
  */
-final readonly class Uri implements UriInterface
+final class Uri implements UriInterface
 {
-    private const DEFAULT_PORTS = [
-        'http' => 80,
-        'https' => 443,
-        'ftp' => 21,
-        'ssh' => 22,
-    ];
+    private const array DEFAULT_PORTS = ['http' => 80, 'https' => 443, 'ws' => 80, 'wss' => 443, 'ftp' => 21];
 
-    private string $scheme;
-    private string $userInfo;
-    private string $host;
-    private ?int $port;
-    private string $path;
-    private string $query;
-    private string $fragment;
+    private const string SCHEME = '/\A(?:[a-z][a-z0-9+\-.]*)?\z/';
+
+    /** reg-name (unreserved, pct-encoded, sub-delims), or an IP literal in brackets. */
+    private const string HOST = '/\A(?:[a-z0-9\-._~!$&\'()*+,;=]|%[0-9a-f]{2})*\z|\A\[(?:[0-9a-f:.]+|v[0-9a-f]+\.[a-z0-9\-._~!$&\'()*+,;=:]+)\]\z/';
+
+    /** Characters outside unreserved and sub-delims, and a "%" that does not start an escape. */
+    private const string USER = '/[^A-Za-z0-9\-._~!$&\'()*+,;=%]|%(?![0-9A-Fa-f]{2})/';
+
+    private const string PASSWORD = '/[^A-Za-z0-9\-._~!$&\'()*+,;=:%]|%(?![0-9A-Fa-f]{2})/';
+
+    private const string PATH = '/[^A-Za-z0-9\-._~!$&\'()*+,;=:@\/%]|%(?![0-9A-Fa-f]{2})/';
+
+    private const string QUERY = '/[^A-Za-z0-9\-._~!$&\'()*+,;=:@\/?%]|%(?![0-9A-Fa-f]{2})/';
+
+    private string $scheme = '';
+
+    private string $userInfo = '';
+
+    private string $host = '';
+
+    private ?int $port = null;
+
+    private string $path = '';
+
+    private string $query = '';
+
+    private string $fragment = '';
 
     public function __construct(string $uri = '')
     {
-        if ($uri === '') {
-            $this->scheme = '';
-            $this->userInfo = '';
-            $this->host = '';
-            $this->port = null;
-            $this->path = '';
-            $this->query = '';
-            $this->fragment = '';
-            return;
-        }
-
         $parts = parse_url($uri);
+
         if ($parts === false) {
-            throw new \InvalidArgumentException("Unable to parse URI: {$uri}");
+            throw InvalidUriException::unparsable();
         }
 
-        $this->scheme = isset($parts['scheme']) ? strtolower($parts['scheme']) : '';
-        $this->host = isset($parts['host']) ? strtolower($parts['host']) : '';
-        $this->port = isset($parts['port']) ? self::filterPort($parts['port']) : null;
-        $this->path = isset($parts['path']) ? self::filterPath($parts['path']) : '';
-        $this->query = isset($parts['query']) ? self::filterQueryOrFragment($parts['query']) : '';
-        $this->fragment = isset($parts['fragment']) ? self::filterQueryOrFragment($parts['fragment']) : '';
-
-        $user = $parts['user'] ?? '';
-        $pass = $parts['pass'] ?? null;
-        $this->userInfo = $pass !== null ? "{$user}:{$pass}" : $user;
+        $parts += ['scheme' => '', 'user' => '', 'pass' => null, 'host' => '', 'port' => null, 'path' => '', 'query' => '', 'fragment' => ''];
+        $this->scheme = self::scheme($parts['scheme']);
+        $this->userInfo = self::userInfo($parts['user'], $parts['pass']);
+        $this->host = self::host($parts['host']);
+        $this->port = self::port($parts['port']);
+        $this->path = self::encode(self::PATH, $parts['path']);
+        $this->query = self::encode(self::QUERY, $parts['query']);
+        $this->fragment = self::encode(self::QUERY, $parts['fragment']);
     }
 
-    // ── PSR-7 Accessors ──────────────────────────────────────────────────
-
+    #[\Override]
     public function getScheme(): string
     {
         return $this->scheme;
     }
 
+    #[\Override]
     public function getAuthority(): string
     {
-        $authority = $this->host;
-        if ($authority === '') {
+        if ($this->host === '') {
             return '';
         }
 
-        if ($this->userInfo !== '') {
-            $authority = $this->userInfo . '@' . $authority;
-        }
+        $authority = $this->userInfo === '' ? $this->host : $this->userInfo . '@' . $this->host;
+        $port = $this->getPort();
 
-        if ($this->port !== null && !self::isDefaultPort($this->scheme, $this->port)) {
-            $authority .= ':' . $this->port;
-        }
-
-        return $authority;
+        return $port === null ? $authority : $authority . ':' . $port;
     }
 
+    #[\Override]
     public function getUserInfo(): string
     {
         return $this->userInfo;
     }
 
+    #[\Override]
     public function getHost(): string
     {
         return $this->host;
     }
 
+    #[\Override]
     public function getPort(): ?int
     {
-        return self::isDefaultPort($this->scheme, $this->port) ? null : $this->port;
+        return $this->port === (self::DEFAULT_PORTS[$this->scheme] ?? null) ? null : $this->port;
     }
 
+    #[\Override]
     public function getPath(): string
     {
         return $this->path;
     }
 
+    #[\Override]
     public function getQuery(): string
     {
         return $this->query;
     }
 
+    #[\Override]
     public function getFragment(): string
     {
         return $this->fragment;
     }
 
-    // ── PSR-7 Immutable Setters ──────────────────────────────────────────
-
+    #[\Override]
     public function withScheme(string $scheme): UriInterface
     {
-        $normalized = strtolower($scheme);
-        if ($normalized === $this->scheme) {
-            return $this;
-        }
+        $new = clone $this;
+        $new->scheme = self::scheme($scheme);
 
-        return new self($this->buildUri(scheme: $normalized));
+        return $new;
     }
 
+    #[\Override]
     public function withUserInfo(string $user, ?string $password = null): UriInterface
     {
-        $info = $password !== null && $password !== '' ? "{$user}:{$password}" : $user;
-        if ($info === $this->userInfo) {
-            return $this;
-        }
+        $new = clone $this;
+        $new->userInfo = self::userInfo($user, $password);
 
-        return new self($this->buildUri(userInfo: $info));
+        return $new;
     }
 
+    #[\Override]
     public function withHost(string $host): UriInterface
     {
-        $normalized = strtolower($host);
-        if ($normalized === $this->host) {
-            return $this;
-        }
+        $new = clone $this;
+        $new->host = self::host($host);
 
-        return new self($this->buildUri(host: $normalized));
+        return $new;
     }
 
+    #[\Override]
     public function withPort(?int $port): UriInterface
     {
-        $filtered = $port !== null ? self::filterPort($port) : null;
-        if ($filtered === $this->port) {
-            return $this;
-        }
+        $new = clone $this;
+        $new->port = self::port($port);
 
-        return new self($this->buildUri(port: $filtered));
+        return $new;
     }
 
+    #[\Override]
     public function withPath(string $path): UriInterface
     {
-        $filtered = self::filterPath($path);
-        if ($filtered === $this->path) {
-            return $this;
-        }
+        $new = clone $this;
+        $new->path = self::encode(self::PATH, $path);
 
-        return new self($this->buildUri(path: $filtered));
+        return $new;
     }
 
+    #[\Override]
     public function withQuery(string $query): UriInterface
     {
-        $filtered = self::filterQueryOrFragment($query);
-        if ($filtered === $this->query) {
-            return $this;
-        }
+        $new = clone $this;
+        $new->query = self::encode(self::QUERY, $query);
 
-        return new self($this->buildUri(query: $filtered));
+        return $new;
     }
 
+    #[\Override]
     public function withFragment(string $fragment): UriInterface
     {
-        $filtered = self::filterQueryOrFragment($fragment);
-        if ($filtered === $this->fragment) {
-            return $this;
-        }
+        $new = clone $this;
+        $new->fragment = self::encode(self::QUERY, $fragment);
 
-        return new self($this->buildUri(fragment: $filtered));
-    }
-
-    public function __toString(): string
-    {
-        return self::composeUri(
-            $this->scheme,
-            $this->getAuthority(),
-            $this->path,
-            $this->query,
-            $this->fragment,
-        );
-    }
-
-    // ── Internals ────────────────────────────────────────────────────────
-
-    private function buildUri(
-        ?string $scheme = null,
-        ?string $userInfo = null,
-        ?string $host = null,
-        ?int $port = -1,
-        ?string $path = null,
-        ?string $query = null,
-        ?string $fragment = null,
-    ): string {
-        $resolvedScheme = $scheme ?? $this->scheme;
-        $resolvedUserInfo = $userInfo ?? $this->userInfo;
-        $resolvedHost = $host ?? $this->host;
-        $resolvedPort = $port === -1 ? $this->port : $port;
-        $resolvedPath = $path ?? $this->path;
-        $resolvedQuery = $query ?? $this->query;
-        $resolvedFragment = $fragment ?? $this->fragment;
-
-        $authority = $resolvedHost;
-        if ($authority !== '' && $resolvedUserInfo !== '') {
-            $authority = $resolvedUserInfo . '@' . $authority;
-        }
-        if ($authority !== '' && $resolvedPort !== null && !self::isDefaultPort($resolvedScheme, $resolvedPort)) {
-            $authority .= ':' . $resolvedPort;
-        }
-
-        return self::composeUri($resolvedScheme, $authority, $resolvedPath, $resolvedQuery, $resolvedFragment);
+        return $new;
     }
 
     /**
-     * RFC 3986 §5.3 — Component Recomposition.
+     * PSR-7 §3.5: a rootless path after an authority gains a "/", and
+     * leading slashes without an authority shrink to one, so the path can
+     * never be read as an authority.
      */
-    private static function composeUri(
-        string $scheme,
-        string $authority,
-        string $path,
-        string $query,
-        string $fragment,
-    ): string {
-        $uri = '';
+    #[\Override]
+    public function __toString(): string
+    {
+        $authority = $this->getAuthority();
+        $path = $this->path;
 
-        if ($scheme !== '') {
-            $uri .= $scheme . ':';
+        if ($authority !== '' && $path !== '' && !str_starts_with($path, '/')) {
+            $path = '/' . $path;
+        } elseif ($authority === '' && str_starts_with($path, '//')) {
+            $path = '/' . ltrim($path, '/');
         }
 
-        if ($authority !== '') {
-            $uri .= '//' . $authority;
-        }
-
-        if ($path !== '') {
-            if ($authority !== '' && !str_starts_with($path, '/')) {
-                $path = '/' . $path;
-            } elseif ($authority === '' && str_starts_with($path, '//')) {
-                $path = '/' . ltrim($path, '/');
-            }
-        }
-
-        $uri .= $path;
-
-        if ($query !== '') {
-            $uri .= '?' . $query;
-        }
-
-        if ($fragment !== '') {
-            $uri .= '#' . $fragment;
-        }
-
-        return $uri;
+        return ($this->scheme === '' ? '' : $this->scheme . ':')
+            . ($authority === '' ? '' : '//' . $authority)
+            . $path
+            . ($this->query === '' ? '' : '?' . $this->query)
+            . ($this->fragment === '' ? '' : '#' . $this->fragment);
     }
 
-    private static function filterPort(int $port): int
+    private static function scheme(string $scheme): string
     {
-        if ($port < 0 || $port > 65535) {
-            throw new \InvalidArgumentException("Invalid port: {$port}. Must be 0–65535");
-        }
+        $scheme = strtolower($scheme);
 
-        return $port;
+        return preg_match(self::SCHEME, $scheme) === 1 ? $scheme : throw InvalidUriException::scheme();
     }
 
-    private static function filterPath(string $path): string
+    private static function userInfo(string $user, ?string $password): string
     {
-        return preg_replace_callback(
-            '/[^a-zA-Z0-9_\-.~!$&\'()*+,;=:@\/%]/',
-            static fn (array $m) => rawurlencode($m[0]),
-            $path,
-        );
+        $user = self::encode(self::USER, $user);
+
+        return $password === null || $password === '' ? $user : $user . ':' . self::encode(self::PASSWORD, $password);
     }
 
-    private static function filterQueryOrFragment(string $value): string
+    private static function host(string $host): string
     {
-        return preg_replace_callback(
-            '/[^a-zA-Z0-9_\-.~!$&\'()*+,;=:@\/?%]/',
-            static fn (array $m) => rawurlencode($m[0]),
-            $value,
-        );
+        $host = strtolower($host);
+
+        return preg_match(self::HOST, $host) === 1 ? $host : throw InvalidUriException::host();
     }
 
-    private static function isDefaultPort(string $scheme, ?int $port): bool
+    private static function port(?int $port): ?int
     {
-        if ($port === null) {
-            return false;
-        }
+        return $port === null || ($port >= 0 && $port <= 65535) ? $port : throw InvalidUriException::port();
+    }
 
-        return (self::DEFAULT_PORTS[$scheme] ?? null) === $port;
+    /**
+     * @param non-empty-string $unsafe
+     */
+    private static function encode(string $unsafe, string $value): string
+    {
+        return (string) preg_replace_callback($unsafe, static fn(array $match): string => rawurlencode($match[0]), $value);
     }
 }

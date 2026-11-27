@@ -4,34 +4,49 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Middleware;
 
+use KaririCode\Http\Exception\InvalidConfigurationException;
+
 /**
- * Immutable CORS policy configuration.
+ * The CORS policy CorsMiddleware applies: allowed origins, methods and
+ * request headers, exposed response headers, preflight max-age and whether
+ * credentialed requests are allowed. The constructor refuses a policy that
+ * would expose credentialed responses to every site — "*" together with
+ * credentials, which the middleware would otherwise have to answer by
+ * echoing whatever Origin arrived — and origins that are not "*" or
+ * scheme://host[:port]; "null" is refused too, since sandboxed documents
+ * and redirects send it.
  *
- * ARFA 1.3 P1 (Immutable State Transformation): all with* methods
- * return new instances. Static factories provide common presets.
+ * ARFA 1.3: P1 (immutable; with*() returns a new policy). Spec V4.3.3:
+ * final readonly Value Object, validated on construction.
  *
- * Spec V4.0: final readonly class.
+ * Preconditions: "*" stands alone and never with $allowCredentials;
+ * $maxAge ≥ 0 (InvalidConfigurationException 1760 to 1762).
  *
- * Each property maps directly to a CORS response header:
- *   allowedOrigins   → Access-Control-Allow-Origin
- *   allowedMethods   → Access-Control-Allow-Methods
- *   allowedHeaders   → Access-Control-Allow-Headers
- *   exposedHeaders   → Access-Control-Expose-Headers
- *   maxAge           → Access-Control-Max-Age
- *   allowCredentials → Access-Control-Allow-Credentials
+ * Thread-safety: immutable; safe to share.
  *
- * @see https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     $cors = CorsConfiguration::singleOrigin('https://app.example.com')
+ *         ->withExposedHeaders(['X-Request-Id']);
+ *
+ * References: Fetch Standard §3.2 (CORS protocol), §3.2.5 (credentials);
+ * RFC 6454 §6.2 (origin serialisation); OWASP HTML5 Security Cheat Sheet;
+ * ADR-006.
+ *
  * @see https://fetch.spec.whatwg.org/#http-cors-protocol
  */
 final readonly class CorsConfiguration
 {
+    /** scheme "://" host [":" port], as a browser serialises an origin. */
+    private const string ORIGIN = '/\A[a-z][a-z0-9+\-.]*:\/\/(?:\[[0-9a-f:.]+\]|[a-z0-9\-._~%]+)(?::\d{1,5})?\z/i';
+
     /**
-     * @param list<string> $allowedOrigins  Exact origins or ['*'] for wildcard
-     * @param list<string> $allowedMethods  HTTP methods (uppercase)
-     * @param list<string> $allowedHeaders  Request headers the client may send
-     * @param list<string> $exposedHeaders  Response headers the client may read
-     * @param int          $maxAge          Preflight cache duration in seconds
-     * @param bool         $allowCredentials Whether to allow cookies/auth headers
+     * @param list<string> $allowedOrigins "*" or scheme://host[:port] entries
+     * @param list<string> $allowedMethods
+     * @param list<string> $allowedHeaders request headers a preflight may announce; ["*"] echoes the announced ones
+     * @param list<string> $exposedHeaders response headers scripts may read
      */
     public function __construct(
         public array $allowedOrigins = ['*'],
@@ -41,63 +56,64 @@ final readonly class CorsConfiguration
         public int $maxAge = 86400,
         public bool $allowCredentials = false,
     ) {
+        foreach ($allowedOrigins as $origin) {
+            if (($origin !== '*' || count($allowedOrigins) !== 1) && preg_match(self::ORIGIN, $origin) !== 1) {
+                throw InvalidConfigurationException::corsOrigin($origin);
+            }
+        }
+
+        if ($allowCredentials && in_array('*', $allowedOrigins, true)) {
+            throw InvalidConfigurationException::corsWildcardWithCredentials();
+        }
+
+        if ($maxAge < 0) {
+            throw InvalidConfigurationException::negativeMaxAge();
+        }
     }
 
-    // ── Static Factories ─────────────────────────────────────────────────
-
-    /**
-     * Permissive policy — allows all origins, methods, and headers.
-     * Suitable for public APIs during development.
-     */
+    /** Any origin, no credentials, any request header: for public APIs. */
     public static function permissive(): self
     {
         return new self(
             allowedOrigins: ['*'],
             allowedMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
             allowedHeaders: ['*'],
-            exposedHeaders: [],
-            maxAge: 86400,
-            allowCredentials: false,
         );
+    }
+
+    /** One origin, with credentials: a browser app on its own domain. */
+    public static function singleOrigin(string $origin): self
+    {
+        return new self(allowedOrigins: [$origin], allowCredentials: true);
     }
 
     /**
-     * Strict single-origin policy with credentials support.
-     * Suitable for SPAs with a known frontend origin.
+     * @param list<string> $origins
      */
-    public static function singleOrigin(string $origin): self
-    {
-        return new self(
-            allowedOrigins: [$origin],
-            allowedMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-            allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-            exposedHeaders: [],
-            maxAge: 86400,
-            allowCredentials: true,
-        );
-    }
-
-    // ── Wither Methods ───────────────────────────────────────────────────
-
-    /** @param list<string> $origins */
     public function withAllowedOrigins(array $origins): self
     {
         return new self($origins, $this->allowedMethods, $this->allowedHeaders, $this->exposedHeaders, $this->maxAge, $this->allowCredentials);
     }
 
-    /** @param list<string> $methods */
+    /**
+     * @param list<string> $methods
+     */
     public function withAllowedMethods(array $methods): self
     {
         return new self($this->allowedOrigins, $methods, $this->allowedHeaders, $this->exposedHeaders, $this->maxAge, $this->allowCredentials);
     }
 
-    /** @param list<string> $headers */
+    /**
+     * @param list<string> $headers
+     */
     public function withAllowedHeaders(array $headers): self
     {
         return new self($this->allowedOrigins, $this->allowedMethods, $headers, $this->exposedHeaders, $this->maxAge, $this->allowCredentials);
     }
 
-    /** @param list<string> $headers */
+    /**
+     * @param list<string> $headers
+     */
     public function withExposedHeaders(array $headers): self
     {
         return new self($this->allowedOrigins, $this->allowedMethods, $this->allowedHeaders, $headers, $this->maxAge, $this->allowCredentials);
@@ -113,8 +129,6 @@ final readonly class CorsConfiguration
         return new self($this->allowedOrigins, $this->allowedMethods, $this->allowedHeaders, $this->exposedHeaders, $this->maxAge, $allow);
     }
 
-    // ── Query Methods ────────────────────────────────────────────────────
-
     public function isWildcardOrigin(): bool
     {
         return $this->allowedOrigins === ['*'];
@@ -125,17 +139,24 @@ final readonly class CorsConfiguration
         return $this->allowedHeaders === ['*'];
     }
 
+    /** Origins compare case-insensitively, as browsers serialise them in lower case. */
     public function isOriginAllowed(string $origin): bool
     {
         if ($this->isWildcardOrigin()) {
             return true;
         }
 
-        return in_array($origin, $this->allowedOrigins, true);
+        foreach ($this->allowedOrigins as $allowed) {
+            if (strcasecmp($allowed, $origin) === 0) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function isMethodAllowed(string $method): bool
     {
-        return in_array(strtoupper($method), $this->allowedMethods, true);
+        return in_array(strtoupper($method), array_map(strtoupper(...), $this->allowedMethods), true);
     }
 }

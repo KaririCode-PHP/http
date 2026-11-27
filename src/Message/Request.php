@@ -9,33 +9,38 @@ use Psr\Http\Message\StreamInterface;
 use Psr\Http\Message\UriInterface;
 
 /**
- * Immutable outgoing HTTP request (PSR-7 §3.1, RFC 9110 §9).
+ * An outgoing HTTP request (PSR-7 RequestInterface), as a client sends it.
+ * Method, URI, headers, body and protocol version are checked when the
+ * request is built and on every with*() call (MessageState, RequestLine);
+ * the Host header follows the URI unless the caller set one.
  *
- * ARFA 1.3 P1 (Immutable State Transformation): every with* method
- * clones internal state and returns a new instance. Original is
- * never mutated, ensuring thread-safety in async runtimes
- * (Swoole, RoadRunner, ReactPHP).
+ * ARFA 1.3: P1 (immutable; with*() returns a new request). Spec V4.3.3:
+ * final PSR-7 message; the getX() methods are the PSR-7 contract.
  *
- * Auto-sets Host header from URI when not explicitly provided,
- * per PSR-7 §3.1.2.
- * Spec V4.0: final class, immutable (all with* return new instance).
+ * Preconditions: $method is a token, $headers maps field names to a string
+ * or a list of strings without control characters, $protocolVersion is
+ * like "1.1" (InvalidMessageException otherwise).
  *
- * @see https://www.php-fig.org/psr/psr-7/#32-psrhttpmessagerequestinterface PSR-7 Request
+ * Thread-safety: immutable once built; the body stream is shared by the
+ * copies with*() makes, as PSR-7 intends.
+ *
+ * Side effects: none.
+ *
+ * Example:
+ *
+ *     $request = new Request('POST', 'https://api.example.com/orders', ['Content-Type' => 'application/json'], Stream::fromString($json));
+ *
+ * References: PSR-7 RequestInterface; RFC 9110; ADR-001, ADR-005.
+ *
+ * @see https://www.php-fig.org/psr/psr-7/#32-psrhttpmessagerequestinterface
  */
 final class Request implements RequestInterface
 {
-    use HasHeaders;
-
-    private string $method;
-    private ?string $requestTarget = null;
-    private UriInterface $uri;
-    private string $protocolVersion;
-    private StreamInterface $body;
+    use MessageState;
+    use RequestLine;
 
     /**
-     * @param array<string, string|list<string>> $headers
-      *
-      * @see https://www.php-fig.org/psr/psr-7/#32-psrhttpmessagerequestinterface PSR-7 Request
+     * @param array<array-key, mixed> $headers field name => string or list of strings
      */
     public function __construct(
         string $method = 'GET',
@@ -44,135 +49,7 @@ final class Request implements RequestInterface
         ?StreamInterface $body = null,
         string $protocolVersion = '1.1',
     ) {
-        $this->method = strtoupper($method);
-        $this->uri = is_string($uri) ? new Uri($uri) : $uri;
-        $this->protocolVersion = $protocolVersion;
-        $this->body = $body ?? Stream::empty();
-        $this->setHeaders($headers);
-
-        // Auto-set Host header from URI if not provided
-        if (!$this->hasHeader('Host') && $this->uri->getHost() !== '') {
-            $host = $this->uri->getHost();
-            $port = $this->uri->getPort();
-            if ($port !== null) {
-                $host .= ':' . $port;
-            }
-            [$this->headers, $this->headerNames] = $this->headersWith('Host', [$host]);
-        }
-    }
-
-    // ── RequestInterface ─────────────────────────────────────────────────
-
-    public function getRequestTarget(): string
-    {
-        if ($this->requestTarget !== null) {
-            return $this->requestTarget;
-        }
-
-        $target = $this->uri->getPath() ?: '/';
-        $query = $this->uri->getQuery();
-        if ($query !== '') {
-            $target .= '?' . $query;
-        }
-
-        return $target;
-    }
-
-    public function withRequestTarget(string $requestTarget): RequestInterface
-    {
-        $new = clone $this;
-        $new->requestTarget = $requestTarget;
-
-        return $new;
-    }
-
-    public function getMethod(): string
-    {
-        return $this->method;
-    }
-
-    public function withMethod(string $method): RequestInterface
-    {
-        $new = clone $this;
-        $new->method = strtoupper($method);
-
-        return $new;
-    }
-
-    public function getUri(): UriInterface
-    {
-        return $this->uri;
-    }
-
-    public function withUri(UriInterface $uri, bool $preserveHost = false): RequestInterface
-    {
-        $new = clone $this;
-        $new->uri = $uri;
-
-        if (!$preserveHost || !$this->hasHeader('Host')) {
-            $host = $uri->getHost();
-            if ($host !== '') {
-                $port = $uri->getPort();
-                if ($port !== null) {
-                    $host .= ':' . $port;
-                }
-                [$new->headers, $new->headerNames] = $new->headersWith('Host', [$host]);
-            }
-        }
-
-        return $new;
-    }
-
-    // ── MessageInterface ─────────────────────────────────────────────────
-
-    public function getProtocolVersion(): string
-    {
-        return $this->protocolVersion;
-    }
-
-    public function withProtocolVersion(string $version): static
-    {
-        $new = clone $this;
-        $new->protocolVersion = $version;
-
-        return $new;
-    }
-
-    public function withHeader(string $name, $value): static
-    {
-        $new = clone $this;
-        [$new->headers, $new->headerNames] = $new->headersWith($name, self::normalizeHeaderValue($value));
-
-        return $new;
-    }
-
-    public function withAddedHeader(string $name, $value): static
-    {
-        $new = clone $this;
-        [$new->headers, $new->headerNames] = $new->headersWithAdded($name, self::normalizeHeaderValue($value));
-
-        return $new;
-    }
-
-    public function withoutHeader(string $name): static
-    {
-        $new = clone $this;
-        [$new->headers, $new->headerNames] = $new->headersWithout($name);
-
-        return $new;
-    }
-
-    public function getBody(): StreamInterface
-    {
-        return $this->body;
-    }
-
-    public function withBody(StreamInterface $body): static
-    {
-        $new = clone $this;
-        $new->body = $body;
-
-        return $new;
+        $this->initializeMessage($protocolVersion, $headers, $body);
+        $this->initializeRequestLine($method, $uri);
     }
 }
-

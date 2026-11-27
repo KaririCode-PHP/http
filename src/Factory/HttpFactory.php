@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Factory;
 
+use KaririCode\Http\Exception\InvalidMessageException;
+use KaririCode\Http\Exception\StreamException;
 use KaririCode\Http\Message\Request;
 use KaririCode\Http\Message\Response;
 use KaririCode\Http\Message\ServerRequest;
+use KaririCode\Http\Message\Silently;
 use KaririCode\Http\Message\Stream;
 use KaririCode\Http\Message\UploadedFile;
 use KaririCode\Http\Message\Uri;
@@ -24,20 +27,31 @@ use Psr\Http\Message\UriFactoryInterface;
 use Psr\Http\Message\UriInterface;
 
 /**
- * Unified PSR-17 factory implementing all six factory interfaces.
+ * All six PSR-17 factories in one object, building this package's
+ * messages, so code written against PSR-17 gets the validated
+ * implementations. createStreamFromFile() opens what the application names;
+ * it is never a path a client chose.
  *
- * Single DI registration satisfies RequestFactoryInterface,
- * ResponseFactoryInterface, ServerRequestFactoryInterface,
- * StreamFactoryInterface, UploadedFileFactoryInterface, and
- * UriFactoryInterface. Avoids the six-class proliferation pattern
- * common in other PSR-17 implementations.
+ * ARFA 1.3: P4 (code depends on PSR-17, not on these classes). Spec V4.3.3:
+ * final, stateless factory.
  *
- * ARFA 1.3 P1 (Immutable State Transformation): all factory
- * methods return new immutable objects.
+ * Preconditions: arguments follow the message rules (ADR-005);
+ * createStreamFromFile() throws InvalidMessageException 1712 for a mode PHP
+ * would misread (PSR-17 asks for \InvalidArgumentException) and
+ * StreamException 1735 when the file cannot be opened.
  *
- * Spec V4.0: final class, no inheritance, zero state.
+ * Thread-safety: stateless; safe to share.
  *
- * @see https://www.php-fig.org/psr/psr-17/ PSR-17 HTTP Factories
+ * Side effects: createStreamFromFile() opens a file.
+ *
+ * Example:
+ *
+ *     $factory = new HttpFactory();
+ *     $response = $factory->createResponse(404)->withBody($factory->createStream('{"error":"not found"}'));
+ *
+ * References: PSR-17 HTTP Factories; ADR-001.
+ *
+ * @see https://www.php-fig.org/psr/psr-17/
  */
 final class HttpFactory implements
     RequestFactoryInterface,
@@ -47,45 +61,60 @@ final class HttpFactory implements
     UploadedFileFactoryInterface,
     UriFactoryInterface
 {
+    /** A mode as PHP reads it: the access letter, then "+" and the b, t, e and n flags. "rw" would open read-only. */
+    private const string FILE_MODE = '/\A[rwaxc][+bten]*\z/';
+
+    #[\Override]
     public function createRequest(string $method, $uri): RequestInterface
     {
-        return new Request($method, is_string($uri) ? new Uri($uri) : $uri);
+        return new Request($method, $uri);
     }
 
+    #[\Override]
     public function createResponse(int $code = 200, string $reasonPhrase = ''): ResponseInterface
     {
         return new Response($code, $reasonPhrase);
     }
 
+    /**
+     * @param UriInterface|string     $uri
+     * @param array<array-key, mixed> $serverParams
+     */
+    #[\Override]
     public function createServerRequest(string $method, $uri, array $serverParams = []): ServerRequestInterface
     {
-        return new ServerRequest(
-            $method,
-            is_string($uri) ? new Uri($uri) : $uri,
-            serverParams: $serverParams,
-        );
+        return new ServerRequest($method, $uri, serverParams: $serverParams);
     }
 
+    #[\Override]
     public function createStream(string $content = ''): StreamInterface
     {
         return Stream::fromString($content);
     }
 
+    #[\Override]
     public function createStreamFromFile(string $filename, string $mode = 'r'): StreamInterface
     {
-        $resource = @fopen($filename, $mode);
-        if ($resource === false) {
-            throw new \RuntimeException("Unable to open file: {$filename}");
+        if (preg_match(self::FILE_MODE, $mode) !== 1) {
+            throw InvalidMessageException::streamMode($mode);
         }
 
-        return new Stream($resource);
+        if ($filename === '' || str_contains($filename, "\0")) {
+            throw StreamException::openFailed($filename);
+        }
+
+        $resource = Silently::run(static fn(): mixed => fopen($filename, $mode));
+
+        return is_resource($resource) ? new Stream($resource) : throw StreamException::openFailed($filename);
     }
 
+    #[\Override]
     public function createStreamFromResource($resource): StreamInterface
     {
         return new Stream($resource);
     }
 
+    #[\Override]
     public function createUploadedFile(
         StreamInterface $stream,
         ?int $size = null,
@@ -93,18 +122,12 @@ final class HttpFactory implements
         ?string $clientFilename = null,
         ?string $clientMediaType = null,
     ): UploadedFileInterface {
-        return new UploadedFile(
-            $stream,
-            $size ?? $stream->getSize() ?? 0,
-            $error,
-            $clientFilename,
-            $clientMediaType,
-        );
+        return new UploadedFile($stream, $size ?? $stream->getSize(), $error, $clientFilename, $clientMediaType);
     }
 
+    #[\Override]
     public function createUri(string $uri = ''): UriInterface
     {
         return new Uri($uri);
     }
 }
-

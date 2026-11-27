@@ -4,59 +4,62 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Emitter;
 
+use KaririCode\Http\Exception\EmitterException;
+use KaririCode\Http\Exception\InvalidConfigurationException;
 use Psr\Http\Message\ResponseInterface;
 
 /**
- * Emits a PSR-7 Response through the PHP SAPI layer.
+ * Sends a PSR-7 response through the PHP SAPI: the status line, every
+ * header value (the first of each name replaces what PHP set before, so a
+ * framework's default Content-Type does not linger; the rest are added),
+ * then the body in chunks of $bufferSize bytes, stopping when the client
+ * disconnects. Responses built by this package cannot carry a line break in
+ * a header (ADR-005); PHP's header() refuses one as well.
  *
- * ARFA 1.3 P2 (Reactive Flow Composition): terminal pipeline stage
- * that converts the in-memory Response into actual HTTP output.
+ * ARFA 1.3: P2 (terminal stage: response → client). Spec V4.3.3: final,
+ * stateless apart from its buffer size.
  *
- * Sends status line, headers, and streamed body to the client.
- * Reads body in configurable chunks to bound memory usage on
- * large responses. Aborts early on client disconnect.
+ * Preconditions: nothing was sent before emit() (EmitterException 1750);
+ * $bufferSize is at least 1 (InvalidConfigurationException 1764).
  *
- * Spec V4.0: final class, no inheritance, single responsibility.
+ * Thread-safety: writes to the one SAPI output of the process.
  *
- * @see https://www.php-fig.org/psr/psr-7/ PSR-7 HTTP Message Interface
+ * Side effects: sends headers and writes the body to the output.
+ *
+ * Example:
+ *
+ *     (new SapiEmitter())->emit($application->handle(ServerRequest::fromGlobals()));
+ *
+ * References: RFC 9112 §4 (status line); PHP manual, header(); ADR-001.
+ *
+ * @see https://www.php.net/manual/en/function.header.php
  */
 final class SapiEmitter
 {
     public function __construct(
         private readonly int $bufferSize = 8192,
     ) {
+        if ($bufferSize < 1) {
+            throw InvalidConfigurationException::bufferSize();
+        }
     }
 
     public function emit(ResponseInterface $response): void
     {
-        $this->assertNotSent();
-        $this->emitStatusLine($response);
-        $this->emitHeaders($response);
-        $this->emitBody($response);
-    }
+        if (headers_sent($file, $line)) {
+            throw EmitterException::headersAlreadySent($file, $line);
+        }
 
-    private function emitStatusLine(ResponseInterface $response): void
-    {
         $code = $response->getStatusCode();
-        $phrase = $response->getReasonPhrase();
-        $version = $response->getProtocolVersion();
+        header(rtrim(sprintf('HTTP/%s %d %s', $response->getProtocolVersion(), $code, $response->getReasonPhrase())), true, $code);
 
-        header(
-            "HTTP/{$version} {$code} {$phrase}",
-            true,
-            $code,
-        );
-    }
-
-    private function emitHeaders(ResponseInterface $response): void
-    {
         foreach ($response->getHeaders() as $name => $values) {
-            $first = true;
-            foreach ($values as $value) {
-                header("{$name}: {$value}", $first);
-                $first = false;
+            foreach (array_values($values) as $index => $value) {
+                header($name . ': ' . $value, $index === 0);
             }
         }
+
+        $this->emitBody($response);
     }
 
     private function emitBody(ResponseInterface $response): void
@@ -67,22 +70,14 @@ final class SapiEmitter
             $body->rewind();
         }
 
-        while (!$body->eof()) {
-            echo $body->read($this->bufferSize);
+        if (!$body->isReadable()) {
+            echo $body;
 
-            if (connection_aborted()) {
-                break;
-            }
+            return;
         }
-    }
 
-    private function assertNotSent(): void
-    {
-        if (headers_sent($file, $line)) {
-            throw new \RuntimeException(
-                "Headers already sent in {$file} on line {$line}",
-            );
+        while (!$body->eof() && connection_status() === CONNECTION_NORMAL) {
+            echo $body->read($this->bufferSize);
         }
     }
 }
-
