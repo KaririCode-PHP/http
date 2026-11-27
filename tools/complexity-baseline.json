@@ -1,0 +1,9 @@
+{
+    "parameters": {
+        "Request::__construct": "The fields of a PSR-7 request: method, URI, headers, body, protocol version. Callers name them; a parameter object would wrap the message itself.",
+        "Response::__construct": "The fields of a PSR-7 response: status, reason phrase, headers, body, protocol version, each set by named argument.",
+        "ServerRequest::__construct": "The PSR-7 request fields plus the server parameters PSR-7 keeps on a server request.",
+        "UploadedFile::__construct": "The five properties PSR-7 gives an uploaded file: source, size, error, client file name and media type.",
+        "HttpFactory::createUploadedFile": "The signature is PSR-17's UploadedFileFactoryInterface::createUploadedFile()."
+    }
+}
