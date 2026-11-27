@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace KaririCode\Http\Tests\Unit\Message;
 
 use KaririCode\Http\Message\Uri;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(Uri::class)]
 final class UriTest extends TestCase
 {
     // ── Parsing ──────────────────────────────────────────────────────────

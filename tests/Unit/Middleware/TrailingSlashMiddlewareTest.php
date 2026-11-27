@@ -4,101 +4,105 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Tests\Unit\Middleware;
 
-use KaririCode\Http\Message\Response;
 use KaririCode\Http\Message\ServerRequest;
+use KaririCode\Http\Message\Uri;
 use KaririCode\Http\Middleware\TrailingSlashMiddleware;
+use KaririCode\Http\Tests\Support\RecordingHandler;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
-use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\ServerRequestInterface;
-use Psr\Http\Server\RequestHandlerInterface;
 
+#[CoversClass(TrailingSlashMiddleware::class)]
 final class TrailingSlashMiddlewareTest extends TestCase
 {
-    public function testRedirectsGetWithTrailingSlash(): void
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function redirects(): iterable
     {
-        $middleware = new TrailingSlashMiddleware(redirect: true);
-        $request = new ServerRequest('GET', 'https://example.com/users/');
-
-        $response = $middleware->process($request, $this->neverCalledHandler());
-
-        self::assertSame(301, $response->getStatusCode());
-        self::assertStringContainsString('/users', $response->getHeaderLine('Location'));
-        self::assertStringNotContainsString('/users/', $response->getHeaderLine('Location'));
+        yield 'one slash' => ['https://example.com/users/', '/users'];
+        yield 'several slashes' => ['https://example.com/users///', '/users'];
+        yield 'query kept' => ['https://example.com/users/?page=2&sort=name', '/users?page=2&sort=name'];
+        yield 'nested path' => ['https://example.com/a/b/c/', '/a/b/c'];
+        yield 'only slashes' => ['https://example.com//', '/'];
+        yield 'protocol-relative attempt' => ['https://example.com//evil.example/', '/evil.example'];
+        yield 'backslash stays encoded' => ['https://example.com/%5Cevil.example/', '/%5Cevil.example'];
     }
 
-    public function testSilentStripForPostWithTrailingSlash(): void
+    #[Test]
+    #[DataProvider('redirects')]
+    public function getAndHeadAreRedirectedToTheTrimmedPath(string $uri, string $location): void
     {
-        $capturedPath = null;
-        $handler = $this->capturingHandler($capturedPath);
+        foreach (['GET', 'HEAD'] as $method) {
+            $handler = new RecordingHandler();
 
-        $middleware = new TrailingSlashMiddleware(redirect: true);
-        $request = new ServerRequest('POST', 'https://example.com/api/users/');
+            $response = (new TrailingSlashMiddleware())->process(new ServerRequest($method, $uri), $handler);
 
-        $middleware->process($request, $handler);
-
-        self::assertSame('/api/users', $capturedPath);
+            self::assertSame(301, $response->getStatusCode());
+            self::assertSame($location, $response->getHeaderLine('Location'));
+            self::assertSame([], $handler->requests);
+        }
     }
 
-    public function testNoRedirectModeStripsForGet(): void
+    #[Test]
+    public function theLocationNeverNamesTheHostTheClientSent(): void
     {
-        $capturedPath = null;
-        $handler = $this->capturingHandler($capturedPath);
+        $request = ServerRequest::fromServer(['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/users/', 'HTTP_HOST' => 'evil.example']);
 
-        $middleware = new TrailingSlashMiddleware(redirect: false);
-        $request = new ServerRequest('GET', 'https://example.com/path/');
+        $response = (new TrailingSlashMiddleware())->process($request, new RecordingHandler());
 
-        $middleware->process($request, $handler);
-
-        self::assertSame('/path', $capturedPath);
+        self::assertSame('/users', $response->getHeaderLine('Location'));
     }
 
-    public function testRootPathUnchanged(): void
+    #[Test]
+    public function otherMethodsContinueWithThePathRewrittenAndTheHostKept(): void
     {
-        $capturedPath = null;
-        $handler = $this->capturingHandler($capturedPath);
+        foreach (['POST', 'PUT', 'DELETE', 'get'] as $method) {
+            $handler = new RecordingHandler();
+            $request = new ServerRequest($method, 'https://example.com/users//?x=1', ['Host' => 'proxy.example']);
 
-        $middleware = new TrailingSlashMiddleware();
-        $request = new ServerRequest('GET', 'https://example.com/');
+            $response = (new TrailingSlashMiddleware())->process($request, $handler);
 
-        $middleware->process($request, $handler);
-
-        self::assertSame('/', $capturedPath);
+            self::assertSame(200, $response->getStatusCode(), $method);
+            self::assertSame('/users', $handler->last()->getUri()->getPath());
+            self::assertSame('x=1', $handler->last()->getUri()->getQuery());
+            self::assertSame('proxy.example', $handler->last()->getHeaderLine('Host'), 'the Host header is preserved');
+        }
     }
 
-    public function testPathWithoutTrailingSlashPassesThrough(): void
+    #[Test]
+    public function withoutRedirectsEveryMethodIsRewritten(): void
     {
-        $capturedPath = null;
-        $handler = $this->capturingHandler($capturedPath);
+        $handler = new RecordingHandler();
 
-        $middleware = new TrailingSlashMiddleware();
-        $request = new ServerRequest('GET', 'https://example.com/users');
+        $response = (new TrailingSlashMiddleware(redirect: false))->process(new ServerRequest('GET', 'https://example.com/users/'), $handler);
 
-        $middleware->process($request, $handler);
-
-        self::assertSame('/users', $capturedPath);
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame('/users', $handler->last()->getUri()->getPath());
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    private function neverCalledHandler(): RequestHandlerInterface
+    #[Test]
+    public function pathsWithoutATrailingSlashPassUntouched(): void
     {
-        return new class () implements RequestHandlerInterface {
-            public function handle(ServerRequestInterface $request): ResponseInterface
-            {
-                throw new \LogicException('Handler should not be called');
-            }
-        };
+        foreach (['https://example.com/', 'https://example.com/users', 'https://example.com'] as $uri) {
+            $handler = new RecordingHandler();
+            $request = new ServerRequest('GET', $uri);
+
+            (new TrailingSlashMiddleware())->process($request, $handler);
+
+            self::assertSame($request, $handler->last(), $uri);
+        }
     }
 
-    private function capturingHandler(?string &$capturedPath): RequestHandlerInterface
+    #[Test]
+    public function aRootlessPathGainsItsLeadingSlash(): void
     {
-        return new class ($capturedPath) implements RequestHandlerInterface {
-            public function __construct(private ?string &$path) {}
-            public function handle(ServerRequestInterface $request): ResponseInterface
-            {
-                $this->path = $request->getUri()->getPath();
-                return new Response(200);
-            }
-        };
+        $handler = new RecordingHandler();
+        $request = new ServerRequest('POST', (new Uri())->withPath('users/'));
+
+        (new TrailingSlashMiddleware())->process($request, $handler);
+
+        self::assertSame('/users', $handler->last()->getUri()->getPath());
     }
 }

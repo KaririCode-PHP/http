@@ -4,10 +4,18 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Tests\Unit\Security;
 
+use KaririCode\Http\Exception\HttpCode;
+use KaririCode\Http\Exception\InvalidConfigurationException;
+use KaririCode\Http\Security\NetworkRange;
 use KaririCode\Http\Security\PeerVerifyMode;
 use KaririCode\Http\Security\TlsConfiguration;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(TlsConfiguration::class)]
+#[CoversClass(NetworkRange::class)]
+#[CoversClass(PeerVerifyMode::class)]
 final class TlsConfigurationTest extends TestCase
 {
     // ── Defaults ─────────────────────────────────────────────────────────
@@ -222,5 +230,109 @@ final class TlsConfigurationTest extends TestCase
         self::assertArrayNotHasKey('cafile', $options);
         self::assertArrayNotHasKey('capath', $options);
         self::assertArrayNotHasKey('ciphers', $options);
+    }
+
+    // ── Validation ───────────────────────────────────────────────────────
+
+    #[Test]
+    public function aVerifyDepthBelowOneIsRefused(): void
+    {
+        self::assertSame(1, (new TlsConfiguration(verifyDepth: 1))->verifyDepth);
+
+        foreach ([static fn(): TlsConfiguration => new TlsConfiguration(verifyDepth: 0), static fn(): TlsConfiguration => (new TlsConfiguration())->withVerifyDepth(-1)] as $build) {
+            try {
+                $build();
+                self::fail('a depth below 1 was accepted');
+            } catch (InvalidConfigurationException $e) {
+                self::assertSame(HttpCode::InvalidVerifyDepth, $e->errorCode);
+            }
+        }
+    }
+
+    #[Test]
+    public function aTrustedProxyMustBeAnAddressOrRange(): void
+    {
+        try {
+            (new TlsConfiguration())->withTrustedProxies(['10.0.0.0/8', 'proxy.internal']);
+            self::fail('a host name was accepted as a trusted proxy');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame(HttpCode::InvalidTrustedProxy, $e->errorCode);
+            self::assertStringContainsString('"proxy.internal"', $e->getMessage());
+        }
+    }
+
+    // ── Trusted proxies ──────────────────────────────────────────────────
+
+    #[Test]
+    public function onlyListedPeersAreTrustedProxies(): void
+    {
+        $config = (new TlsConfiguration())->withTrustedProxies(['10.0.0.0/8', '2001:db8::1']);
+
+        self::assertSame(['10.0.0.0/8', '2001:db8::1'], $config->trustedProxies);
+        self::assertTrue($config->isTrustedProxy('10.20.30.40'));
+        self::assertTrue($config->isTrustedProxy('2001:db8::1'));
+        self::assertFalse($config->isTrustedProxy('11.0.0.1'));
+        self::assertFalse($config->isTrustedProxy(''));
+        self::assertFalse((new TlsConfiguration())->isTrustedProxy('10.0.0.1'), 'no proxies, no trust');
+    }
+
+    #[Test]
+    public function everyWitherKeepsTheTrustedProxies(): void
+    {
+        $config = (new TlsConfiguration())->withTrustedProxies(['10.0.0.1'])
+            ->withPeerVerifyMode(PeerVerifyMode::Require)
+            ->withVerifyDepth(3)
+            ->withCipherList('HIGH')
+            ->withCipherSuites('TLS_AES_256_GCM_SHA384')
+            ->withAllowedDns(['CN=a'])
+            ->withTrustedFingerprints(['aa']);
+
+        self::assertSame(['10.0.0.1'], $config->trustedProxies);
+        self::assertSame(PeerVerifyMode::Require, $config->peerVerifyMode);
+        self::assertSame(3, $config->verifyDepth);
+        self::assertSame('HIGH', $config->cipherList);
+        self::assertSame('TLS_AES_256_GCM_SHA384', $config->cipherSuites);
+        self::assertSame(['CN=a'], $config->allowedDns);
+        self::assertSame(['aa'], $config->trustedFingerprints);
+    }
+
+    // ── Fingerprints ─────────────────────────────────────────────────────
+
+    #[Test]
+    public function fingerprintsCompareHexDigitsOnly(): void
+    {
+        $config = (new TlsConfiguration())->withTrustedFingerprints(['AA:BB:CC', '11 22 33']);
+
+        self::assertTrue($config->isFingerprintTrusted('aabbcc'));
+        self::assertTrue($config->isFingerprintTrusted('11:22:33'));
+        self::assertFalse($config->isFingerprintTrusted('aabbc'), 'a prefix is not a match');
+        self::assertFalse($config->isFingerprintTrusted('aabbccdd'), 'a longer value is not a match');
+        self::assertFalse($config->isFingerprintTrusted(''), 'a missing fingerprint never matches');
+        self::assertFalse($config->isFingerprintTrusted('::'), 'separators alone are not a fingerprint');
+    }
+
+    #[Test]
+    public function capturingThePeerCertificateFollowsPeerVerification(): void
+    {
+        self::assertTrue(TlsConfiguration::mutual('/c', '/k', '/ca')->toStreamContextOptions()['capture_peer_cert']);
+        self::assertTrue(TlsConfiguration::optionalClient('/c', '/k', '/ca')->toStreamContextOptions()['capture_peer_cert']);
+        self::assertFalse(TlsConfiguration::serverOnly('/c', '/k')->toStreamContextOptions()['capture_peer_cert']);
+        self::assertFalse(TlsConfiguration::serverOnly('/c', '/k')->toStreamContextOptions()['allow_self_signed']);
+    }
+
+    #[Test]
+    public function mutualTlsNeedsBothAVerifyModeAndAClientCa(): void
+    {
+        self::assertFalse((new TlsConfiguration(peerVerifyMode: PeerVerifyMode::Require))->isMutualTls(), 'no CA');
+        self::assertFalse((new TlsConfiguration(caFile: '/ca.pem'))->isMutualTls(), 'no verification');
+        self::assertTrue((new TlsConfiguration(caFile: '/ca.pem', peerVerifyMode: PeerVerifyMode::Optional))->isMutualTls());
+    }
+
+    #[Test]
+    public function aServerCertificateNeedsBothCertificateAndKey(): void
+    {
+        self::assertFalse((new TlsConfiguration(certFile: '/c.pem'))->hasServerCertificate());
+        self::assertFalse((new TlsConfiguration(keyFile: '/k.pem'))->hasServerCertificate());
+        self::assertTrue((new TlsConfiguration(certFile: '/c.pem', keyFile: '/k.pem'))->hasServerCertificate());
     }
 }

@@ -4,9 +4,15 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Tests\Unit\Middleware;
 
+use KaririCode\Http\Exception\HttpCode;
+use KaririCode\Http\Exception\InvalidConfigurationException;
 use KaririCode\Http\Middleware\CorsConfiguration;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(CorsConfiguration::class)]
 final class CorsConfigurationTest extends TestCase
 {
     public function testDefaultValues(): void
@@ -113,11 +119,12 @@ final class CorsConfigurationTest extends TestCase
 
     public function testWithCredentialsReturnsNewInstance(): void
     {
-        $original = new CorsConfiguration();
+        $original = new CorsConfiguration(allowedOrigins: ['https://app.example.com']);
         $modified = $original->withCredentials(true);
 
         self::assertFalse($original->allowCredentials);
         self::assertTrue($modified->allowCredentials);
+        self::assertFalse($modified->withCredentials(false)->allowCredentials);
     }
 
     public function testWitherChaining(): void
@@ -132,5 +139,107 @@ final class CorsConfigurationTest extends TestCase
         self::assertSame(['GET', 'POST'], $config->allowedMethods);
         self::assertTrue($config->allowCredentials);
         self::assertSame(7200, $config->maxAge);
+    }
+
+    // ── Validation ───────────────────────────────────────────────────────
+
+    #[Test]
+    public function credentialsWithAWildcardOriginAreRefused(): void
+    {
+        foreach ([static fn(): CorsConfiguration => new CorsConfiguration(allowCredentials: true), static fn(): CorsConfiguration => (new CorsConfiguration())->withCredentials()] as $build) {
+            try {
+                $build();
+                self::fail('"*" with credentials was accepted');
+            } catch (InvalidConfigurationException $e) {
+                self::assertSame(HttpCode::CorsWildcardWithCredentials, $e->errorCode);
+            }
+        }
+    }
+
+    /**
+     * @return iterable<string, array{list<string>}>
+     */
+    public static function invalidOrigins(): iterable
+    {
+        yield 'with a path' => [['https://app.example.com/']];
+        yield 'opaque null origin' => [['null']];
+        yield 'subdomain pattern' => [['https://*.example.com']];
+        yield 'no scheme' => [['app.example.com']];
+        yield 'wildcard beside an origin' => [['*', 'https://app.example.com']];
+        yield 'with user info' => [['https://user@app.example.com']];
+        yield 'empty' => [['']];
+    }
+
+    /**
+     * @param list<string> $origins
+     */
+    #[Test]
+    #[DataProvider('invalidOrigins')]
+    public function originsMustBeSerialisedOrigins(array $origins): void
+    {
+        try {
+            new CorsConfiguration(allowedOrigins: $origins);
+            self::fail('an invalid origin list was accepted');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame(HttpCode::InvalidCorsOrigin, $e->errorCode);
+        }
+    }
+
+    #[Test]
+    public function validOriginsIncludePortsAndIpLiterals(): void
+    {
+        $origins = ['https://app.example.com', 'http://localhost:8080', 'http://[::1]:3000', 'app-scheme://device'];
+
+        self::assertSame($origins, (new CorsConfiguration(allowedOrigins: $origins))->allowedOrigins);
+        self::assertSame([], (new CorsConfiguration(allowedOrigins: []))->allowedOrigins, 'an empty list allows nobody');
+        self::assertFalse((new CorsConfiguration(allowedOrigins: []))->isOriginAllowed('https://app.example.com'));
+    }
+
+    #[Test]
+    public function aNegativeMaxAgeIsRefused(): void
+    {
+        self::assertSame(0, (new CorsConfiguration())->withMaxAge(0)->maxAge);
+
+        try {
+            (new CorsConfiguration())->withMaxAge(-1);
+            self::fail('a negative max-age was accepted');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame(HttpCode::NegativeMaxAge, $e->errorCode);
+        }
+    }
+
+    #[Test]
+    public function originsCompareWithoutRegardToCase(): void
+    {
+        $config = new CorsConfiguration(allowedOrigins: ['https://App.Example.com']);
+
+        self::assertTrue($config->isOriginAllowed('https://app.example.com'));
+        self::assertFalse($config->isOriginAllowed('https://app.example.com.evil.test'));
+        self::assertFalse($config->isOriginAllowed('https://app.example.co'));
+        self::assertFalse($config->isWildcardOrigin());
+    }
+
+    #[Test]
+    public function theWildcardHeaderPolicyIsRecognised(): void
+    {
+        self::assertTrue(CorsConfiguration::permissive()->isWildcardHeaders());
+        self::assertFalse((new CorsConfiguration())->isWildcardHeaders());
+        self::assertFalse((new CorsConfiguration())->withAllowedHeaders(['*', 'X-A'])->isWildcardHeaders());
+    }
+
+    #[Test]
+    public function thePermissivePolicyAllowsEveryCommonMethod(): void
+    {
+        self::assertSame(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'], CorsConfiguration::permissive()->allowedMethods);
+    }
+
+    #[Test]
+    public function configuredMethodsCompareWithoutRegardToCase(): void
+    {
+        $config = new CorsConfiguration(allowedMethods: ['get', 'Post']);
+
+        self::assertTrue($config->isMethodAllowed('GET'));
+        self::assertTrue($config->isMethodAllowed('post'));
+        self::assertFalse($config->isMethodAllowed('PUT'));
     }
 }

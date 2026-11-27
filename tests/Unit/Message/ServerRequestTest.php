@@ -5,12 +5,16 @@ declare(strict_types=1);
 namespace KaririCode\Http\Tests\Unit\Message;
 
 use KaririCode\Http\Message\ServerRequest;
-use KaririCode\Http\Message\Stream;
 use KaririCode\Http\Message\Uri;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(ServerRequest::class)]
 final class ServerRequestTest extends TestCase
 {
+    /**
+     * @param array<string, mixed> $serverParams
+     */
     private function createRequest(
         string $method = 'GET',
         string $uri = '/',

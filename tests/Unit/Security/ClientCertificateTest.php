@@ -4,191 +4,322 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Tests\Unit\Security;
 
+use KaririCode\Http\Message\Silently;
 use KaririCode\Http\Security\ClientCertificate;
+use KaririCode\Http\Security\DistinguishedName;
+use KaririCode\Http\Tests\Support\TestCertificate;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\Attributes\RequiresPhpExtension;
+use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(ClientCertificate::class)]
+#[CoversClass(DistinguishedName::class)]
+#[CoversClass(Silently::class)]
 final class ClientCertificateTest extends TestCase
 {
-    // ── Constructor ──────────────────────────────────────────────────────
+    // ── Construction ─────────────────────────────────────────────────────
 
-    public function testConstructorWithAllFields(): void
+    #[Test]
+    public function itKeepsWhatItIsGiven(): void
     {
-        $validFrom = new \DateTimeImmutable('2024-01-01');
-        $validTo = new \DateTimeImmutable('2025-12-31');
+        $from = new \DateTimeImmutable('2026-01-01T00:00:00Z');
+        $to = new \DateTimeImmutable('2027-12-31T23:59:59Z');
 
-        $cert = new ClientCertificate(
-            subjectDn: 'CN=service-a,O=Acme,C=BR',
-            issuerDn: 'CN=Internal CA,O=Acme',
-            serialNumber: 'DEADBEEF',
-            fingerprint: 'aabb',
-            validFrom: $validFrom,
-            validTo: $validTo,
-            pem: '-----BEGIN CERTIFICATE-----',
-        );
+        $certificate = new ClientCertificate('CN=service-a,O=Acme,C=BR', 'CN=Internal CA', 'DEADBEEF', 'aabb', $from, $to, '-----BEGIN CERTIFICATE-----');
 
-        self::assertSame('CN=service-a,O=Acme,C=BR', $cert->subjectDn);
-        self::assertSame('CN=Internal CA,O=Acme', $cert->issuerDn);
-        self::assertSame('DEADBEEF', $cert->serialNumber);
-        self::assertSame('aabb', $cert->fingerprint);
-        self::assertSame($validFrom, $cert->validFrom);
-        self::assertSame($validTo, $cert->validTo);
+        self::assertSame('CN=service-a,O=Acme,C=BR', $certificate->subjectDn);
+        self::assertSame('CN=Internal CA', $certificate->issuerDn);
+        self::assertSame('DEADBEEF', $certificate->serialNumber);
+        self::assertSame('aabb', $certificate->fingerprint);
+        self::assertSame($from, $certificate->validFrom);
+        self::assertSame($to, $certificate->validTo);
+        self::assertSame('-----BEGIN CERTIFICATE-----', $certificate->pem);
     }
 
-    public function testDefaultsAreEmpty(): void
+    #[Test]
+    public function optionalFieldsDefaultToUnknown(): void
     {
-        $cert = new ClientCertificate(subjectDn: 'CN=test');
+        $certificate = new ClientCertificate('CN=test');
 
-        self::assertSame('', $cert->issuerDn);
-        self::assertSame('', $cert->serialNumber);
-        self::assertSame('', $cert->fingerprint);
-        self::assertSame('', $cert->pem);
+        self::assertSame('', $certificate->issuerDn);
+        self::assertSame('', $certificate->serialNumber);
+        self::assertSame('', $certificate->fingerprint);
+        self::assertNull($certificate->validFrom);
+        self::assertNull($certificate->validTo);
+        self::assertSame('', $certificate->pem);
+    }
+
+    // ── fromServerParams ─────────────────────────────────────────────────
+
+    #[Test]
+    public function serverVariablesFillEveryField(): void
+    {
+        $certificate = ClientCertificate::fromServerParams([
+            'SSL_CLIENT_S_DN' => 'CN=api-client-7,O=Acme',
+            'SSL_CLIENT_I_DN' => 'CN=Clients CA',
+            'SSL_CLIENT_M_SERIAL' => '1A2B',
+            'SSL_CLIENT_V_START' => 'Nov  7 12:00:00 2026 GMT',
+            'SSL_CLIENT_V_END' => 'Nov 27 12:00:00 2027 GMT',
+        ]);
+
+        self::assertSame('CN=api-client-7,O=Acme', $certificate->subjectDn);
+        self::assertSame('CN=Clients CA', $certificate->issuerDn);
+        self::assertSame('1A2B', $certificate->serialNumber);
+        self::assertSame('2026-11-07T12:00:00+00:00', $certificate->validFrom?->format(\DATE_ATOM));
+        self::assertSame('2027-11-27T12:00:00+00:00', $certificate->validTo?->format(\DATE_ATOM));
+        self::assertSame('', $certificate->fingerprint, 'no PEM, no fingerprint');
+    }
+
+    #[Test]
+    public function serverVariablesOfTheWrongTypeCountAsMissing(): void
+    {
+        $certificate = ClientCertificate::fromServerParams(['SSL_CLIENT_S_DN' => ['CN=x'], 'SSL_CLIENT_M_SERIAL' => 42]);
+
+        self::assertTrue($certificate->isEmpty());
+        self::assertSame('', $certificate->serialNumber);
+    }
+
+    #[Test]
+    #[RequiresPhpExtension('openssl')]
+    public function theFingerprintIsComputedFromTheServerPem(): void
+    {
+        $test = TestCertificate::create();
+
+        $certificate = ClientCertificate::fromServerParams(['SSL_CLIENT_S_DN' => 'CN=client-7', 'SSL_CLIENT_CERT' => $test->pem]);
+
+        self::assertSame($test->fingerprint, $certificate->fingerprint);
+        self::assertSame($test->pem, $certificate->pem);
+    }
+
+    #[Test]
+    public function aPemThatIsNotACertificateHasNoFingerprint(): void
+    {
+        $certificate = ClientCertificate::fromServerParams(['SSL_CLIENT_S_DN' => 'CN=x', 'SSL_CLIENT_CERT' => "-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----"]);
+
+        self::assertSame('', $certificate->fingerprint, 'and no PHP warning escapes (failOnWarning)');
     }
 
     // ── fromProxyHeaders ─────────────────────────────────────────────────
 
-    public function testFromProxyHeadersStandardNginx(): void
+    #[Test]
+    public function proxyHeadersFillEveryField(): void
     {
-        $cert = ClientCertificate::fromProxyHeaders([
+        $certificate = ClientCertificate::fromProxyHeaders([
             'x-ssl-client-dn' => 'CN=api-gateway,O=Corp',
             'x-ssl-client-issuer' => 'CN=Root CA,O=Corp',
             'x-ssl-client-serial' => 'FF01',
             'x-ssl-client-sha256' => 'aabbccdd',
-            'x-ssl-client-notbefore' => '2024-01-01T00:00:00Z',
-            'x-ssl-client-notafter' => '2025-12-31T23:59:59Z',
+            'x-ssl-client-notbefore' => '2026-01-01T00:00:00Z',
+            'x-ssl-client-notafter' => '2027-12-31T23:59:59+00:00',
         ]);
 
-        self::assertSame('CN=api-gateway,O=Corp', $cert->subjectDn);
-        self::assertSame('CN=Root CA,O=Corp', $cert->issuerDn);
-        self::assertSame('FF01', $cert->serialNumber);
-        self::assertSame('aabbccdd', $cert->fingerprint);
-        self::assertSame('2024-01-01', $cert->validFrom->format('Y-m-d'));
-        self::assertSame('2025-12-31', $cert->validTo->format('Y-m-d'));
+        self::assertSame('CN=api-gateway,O=Corp', $certificate->subjectDn);
+        self::assertSame('CN=Root CA,O=Corp', $certificate->issuerDn);
+        self::assertSame('FF01', $certificate->serialNumber);
+        self::assertSame('aabbccdd', $certificate->fingerprint);
+        self::assertSame('2026-01-01T00:00:00+00:00', $certificate->validFrom?->format(\DATE_ATOM));
+        self::assertSame('2027-12-31T23:59:59+00:00', $certificate->validTo?->format(\DATE_ATOM));
     }
 
-    public function testFromProxyHeadersAlternateNames(): void
+    #[Test]
+    public function alternateHeaderNamesAreReadWhenThePrimaryOnesAreAbsentOrEmpty(): void
     {
-        $cert = ClientCertificate::fromProxyHeaders([
+        $certificate = ClientCertificate::fromProxyHeaders([
+            'x-ssl-client-dn' => '',
             'x-client-dn' => 'CN=service-b',
             'x-client-issuer-dn' => 'CN=CA',
             'x-ssl-client-fingerprint' => '1122',
         ]);
 
-        self::assertSame('CN=service-b', $cert->subjectDn);
-        self::assertSame('CN=CA', $cert->issuerDn);
-        self::assertSame('1122', $cert->fingerprint);
+        self::assertSame('CN=service-b', $certificate->subjectDn);
+        self::assertSame('CN=CA', $certificate->issuerDn);
+        self::assertSame('1122', $certificate->fingerprint);
     }
 
-    public function testFromProxyHeadersUrlDecodedPem(): void
+    #[Test]
+    public function thePrimaryHeaderWinsOverTheAlternate(): void
     {
-        $encoded = urlencode("-----BEGIN CERTIFICATE-----\nMIIB...");
-        $cert = ClientCertificate::fromProxyHeaders([
-            'x-ssl-client-dn' => 'CN=test',
-            'x-ssl-client-cert' => $encoded,
+        $certificate = ClientCertificate::fromProxyHeaders(['x-ssl-client-dn' => 'CN=primary', 'x-client-dn' => 'CN=alternate']);
+
+        self::assertSame('CN=primary', $certificate->subjectDn);
+    }
+
+    #[Test]
+    #[RequiresPhpExtension('openssl')]
+    public function anEscapedPemIsDecodedAndItsFingerprintBeatsTheHeader(): void
+    {
+        $test = TestCertificate::create();
+
+        $certificate = ClientCertificate::fromProxyHeaders([
+            'x-ssl-client-dn' => 'CN=client-7',
+            'x-ssl-client-cert' => rawurlencode($test->pem),
+            'x-ssl-client-sha256' => 'forged',
         ]);
 
-        self::assertStringStartsWith('-----BEGIN CERTIFICATE-----', $cert->pem);
+        self::assertSame($test->pem, $certificate->pem);
+        self::assertSame($test->fingerprint, $certificate->fingerprint);
     }
 
-    public function testFromProxyHeadersEmptyReturnsEmptyCert(): void
+    #[Test]
+    public function aPlusSignInThePemStaysAPlusSign(): void
     {
-        $cert = ClientCertificate::fromProxyHeaders([]);
+        $certificate = ClientCertificate::fromProxyHeaders(['x-ssl-client-dn' => 'CN=x', 'x-ssl-client-cert' => 'MIIB+abc%2Bdef%0A']);
 
-        self::assertTrue($cert->isEmpty());
-        self::assertSame('', $cert->subjectDn);
+        self::assertSame("MIIB+abc+def\n", $certificate->pem, 'percent-decoding, not form decoding');
     }
 
-    public function testFromProxyHeadersInvalidDateFallsBack(): void
+    #[Test]
+    public function noHeadersMeanAnEmptyCertificate(): void
     {
-        $cert = ClientCertificate::fromProxyHeaders([
-            'x-ssl-client-dn' => 'CN=test',
-            'x-ssl-client-notbefore' => 'not-a-date',
-            'x-ssl-client-notafter' => 'also-not-a-date',
-        ]);
+        $certificate = ClientCertificate::fromProxyHeaders([]);
 
-        self::assertSame('1970-01-01', $cert->validFrom->format('Y-m-d'));
-        self::assertSame('1970-01-01', $cert->validTo->format('Y-m-d'));
+        self::assertTrue($certificate->isEmpty());
+        self::assertSame('', $certificate->fingerprint);
+        self::assertNull($certificate->validFrom);
     }
 
-    // ── Query Methods ────────────────────────────────────────────────────
-
-    public function testCommonName(): void
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function unreadableDates(): iterable
     {
-        $cert = new ClientCertificate(subjectDn: 'CN=my-service,O=Acme,C=BR');
-
-        self::assertSame('my-service', $cert->commonName());
+        yield 'garbage' => ['not-a-date'];
+        yield 'relative now' => ['now'];
+        yield 'relative offset' => ['+10 years'];
+        yield 'no time zone' => ['Nov 27 12:00:00 2027'];
+        yield 'impossible day' => ['2027-02-30T00:00:00Z'];
+        yield 'empty' => [''];
     }
 
-    public function testCommonNameEmpty(): void
+    #[Test]
+    #[DataProvider('unreadableDates')]
+    public function aDateInAnotherFormatStaysUnknown(string $date): void
     {
-        $cert = new ClientCertificate(subjectDn: 'O=Acme');
+        $certificate = ClientCertificate::fromProxyHeaders(['x-ssl-client-dn' => 'CN=test', 'x-ssl-client-notbefore' => $date, 'x-ssl-client-notafter' => $date]);
 
-        self::assertSame('', $cert->commonName());
+        self::assertNull($certificate->validFrom);
+        self::assertNull($certificate->validTo);
     }
 
-    public function testOrganization(): void
+    #[Test]
+    public function surroundingWhitespaceAroundADateIsIgnored(): void
     {
-        $cert = new ClientCertificate(subjectDn: 'CN=svc,O=Acme Corp,C=BR');
+        $certificate = ClientCertificate::fromProxyHeaders(['x-ssl-client-notafter' => ' Nov 27 12:00:00 2027 GMT ']);
 
-        self::assertSame('Acme Corp', $cert->organization());
+        self::assertSame('2027-11-27T12:00:00+00:00', $certificate->validTo?->format(\DATE_ATOM));
     }
 
-    public function testOrganizationEmpty(): void
-    {
-        $cert = new ClientCertificate(subjectDn: 'CN=svc');
+    // ── fromOpenSslCertificate ───────────────────────────────────────────
 
-        self::assertSame('', $cert->organization());
+    #[Test]
+    #[RequiresPhpExtension('openssl')]
+    public function anOpenSslCertificateFillsEveryField(): void
+    {
+        $test = TestCertificate::create(['commonName' => 'client-7', 'organizationName' => 'Acme, Inc.'], days: 30);
+
+        $certificate = ClientCertificate::fromOpenSslCertificate($test->certificate);
+
+        self::assertSame('CN=client-7,O=Acme\, Inc.', $certificate->subjectDn);
+        self::assertSame($certificate->subjectDn, $certificate->issuerDn, 'self-signed');
+        self::assertSame('client-7', $certificate->commonName());
+        self::assertSame('Acme, Inc.', $certificate->organization());
+        self::assertSame('1A2B', $certificate->serialNumber);
+        self::assertSame($test->fingerprint, $certificate->fingerprint);
+        self::assertSame($test->pem, $certificate->pem);
+        self::assertNotNull($certificate->validFrom);
+        self::assertNotNull($certificate->validTo);
+        self::assertSame(30 * 86400, $certificate->validTo->getTimestamp() - $certificate->validFrom->getTimestamp());
+        self::assertTrue($certificate->isWithinValidityPeriod($certificate->validFrom->modify('+1 day')));
     }
 
-    public function testIsEmpty(): void
+    #[Test]
+    #[RequiresPhpExtension('openssl')]
+    public function subjectValuesAreEscapedSoTheDnReadsBackTheSame(): void
     {
-        self::assertTrue((new ClientCertificate(subjectDn: ''))->isEmpty());
-        self::assertFalse((new ClientCertificate(subjectDn: 'CN=x'))->isEmpty());
+        $test = TestCertificate::create(['commonName' => 'client-7', 'organizationalUnitName' => 'a+b=c;"d"\\e<f>']);
+
+        $certificate = ClientCertificate::fromOpenSslCertificate($test->certificate);
+
+        self::assertSame('CN=client-7,OU=a\\+b\\=c\\;\\"d\\"\\\\e\\<f\\>', $certificate->subjectDn);
+        self::assertSame([['CN', 'client-7'], ['OU', 'a+b=c;"d"\\e<f>']], DistinguishedName::parse($certificate->subjectDn));
     }
 
-    // ── Validity Period ──────────────────────────────────────────────────
-
-    public function testIsExpired(): void
+    #[Test]
+    #[RequiresPhpExtension('openssl')]
+    public function aRepeatedSubjectAttributeKeepsEveryValueInOrder(): void
     {
-        $cert = new ClientCertificate(
-            subjectDn: 'CN=test',
-            validFrom: new \DateTimeImmutable('2020-01-01'),
-            validTo: new \DateTimeImmutable('2023-12-31'),
-        );
+        $test = TestCertificate::create(['commonName' => 'client-7', 'organizationalUnitName' => ['ops', 'dev']]);
 
-        $now = new \DateTimeImmutable('2025-06-15');
+        $certificate = ClientCertificate::fromOpenSslCertificate($test->certificate);
 
-        self::assertTrue($cert->isExpired($now));
-        self::assertFalse($cert->isNotYetValid($now));
-        self::assertFalse($cert->isWithinValidityPeriod($now));
+        self::assertSame('CN=client-7,OU=ops,OU=dev', $certificate->subjectDn);
     }
 
-    public function testIsNotYetValid(): void
+    // ── Names ────────────────────────────────────────────────────────────
+
+    #[Test]
+    public function commonNameAndOrganizationReadTheSubject(): void
     {
-        $cert = new ClientCertificate(
-            subjectDn: 'CN=test',
-            validFrom: new \DateTimeImmutable('2030-01-01'),
-            validTo: new \DateTimeImmutable('2031-12-31'),
-        );
+        $certificate = new ClientCertificate('CN=my-service,O=Acme Corp,C=BR');
 
-        $now = new \DateTimeImmutable('2025-06-15');
-
-        self::assertFalse($cert->isExpired($now));
-        self::assertTrue($cert->isNotYetValid($now));
-        self::assertFalse($cert->isWithinValidityPeriod($now));
+        self::assertSame('my-service', $certificate->commonName());
+        self::assertSame('Acme Corp', $certificate->organization());
+        self::assertSame('', (new ClientCertificate('O=Acme'))->commonName());
+        self::assertSame('', (new ClientCertificate('CN=svc'))->organization());
     }
 
-    public function testIsWithinValidityPeriod(): void
+    #[Test]
+    public function anEscapedSeparatorCannotSmuggleACommonName(): void
     {
-        $cert = new ClientCertificate(
-            subjectDn: 'CN=test',
-            validFrom: new \DateTimeImmutable('2024-01-01'),
-            validTo: new \DateTimeImmutable('2026-12-31'),
-        );
+        $certificate = new ClientCertificate('O=a\,CN=admin');
 
-        $now = new \DateTimeImmutable('2025-06-15');
+        self::assertSame('', $certificate->commonName());
+        self::assertSame('a,CN=admin', $certificate->organization());
+    }
 
-        self::assertFalse($cert->isExpired($now));
-        self::assertFalse($cert->isNotYetValid($now));
-        self::assertTrue($cert->isWithinValidityPeriod($now));
+    #[Test]
+    public function attributeTypesMatchWithoutRegardToCaseAndTheFirstWins(): void
+    {
+        self::assertSame('first', (new ClientCertificate('cn=first,CN=second'))->commonName());
+        self::assertSame('name', (new ClientCertificate('/C=BR/O=Org/CN=name'))->commonName());
+    }
+
+    #[Test]
+    public function isEmptyMeansNoSubject(): void
+    {
+        self::assertTrue((new ClientCertificate(''))->isEmpty());
+        self::assertFalse((new ClientCertificate('CN=x'))->isEmpty());
+    }
+
+    // ── Validity period ──────────────────────────────────────────────────
+
+    #[Test]
+    public function theValidityPeriodIsInclusiveAtBothEnds(): void
+    {
+        $from = new \DateTimeImmutable('2026-01-01T00:00:00Z');
+        $to = new \DateTimeImmutable('2026-12-31T23:59:59Z');
+        $certificate = new ClientCertificate('CN=test', validFrom: $from, validTo: $to);
+
+        self::assertTrue($certificate->isWithinValidityPeriod($from));
+        self::assertTrue($certificate->isWithinValidityPeriod($to));
+        self::assertTrue($certificate->isExpired($to->modify('+1 second')));
+        self::assertFalse($certificate->isExpired($to));
+        self::assertTrue($certificate->isNotYetValid($from->modify('-1 second')));
+        self::assertFalse($certificate->isNotYetValid($from));
+        self::assertFalse($certificate->isWithinValidityPeriod($to->modify('+1 second')));
+        self::assertFalse($certificate->isWithinValidityPeriod($from->modify('-1 second')));
+    }
+
+    #[Test]
+    public function unknownEndsNeverExpireOrStartLate(): void
+    {
+        $certificate = new ClientCertificate('CN=test');
+        $now = new \DateTimeImmutable('2099-01-01T00:00:00Z');
+
+        self::assertFalse($certificate->isExpired($now));
+        self::assertFalse($certificate->isNotYetValid($now));
+        self::assertTrue($certificate->isWithinValidityPeriod($now));
     }
 }

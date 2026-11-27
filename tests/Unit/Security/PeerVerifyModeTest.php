@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace KaririCode\Http\Tests\Unit\Security;
 
 use KaririCode\Http\Security\PeerVerifyMode;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(PeerVerifyMode::class)]
 final class PeerVerifyModeTest extends TestCase
 {
     public function testNoneDoesNotVerifyPeer(): void

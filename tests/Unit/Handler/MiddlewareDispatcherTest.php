@@ -5,15 +5,20 @@ declare(strict_types=1);
 namespace KaririCode\Http\Tests\Unit\Handler;
 
 use KaririCode\Http\Handler\MiddlewareDispatcher;
+use KaririCode\Http\Handler\MiddlewareStep;
 use KaririCode\Http\Message\Response;
 use KaririCode\Http\Message\ServerRequest;
 use KaririCode\Http\Message\Stream;
+use KaririCode\Http\Tests\Support\RecordingHandler;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface;
 
+#[CoversClass(MiddlewareDispatcher::class)]
+#[CoversClass(MiddlewareStep::class)]
 final class MiddlewareDispatcherTest extends TestCase
 {
     public function testFallbackHandlerCalledWhenNoMiddleware(): void
@@ -91,15 +96,7 @@ final class MiddlewareDispatcherTest extends TestCase
 
     public function testMiddlewareCanModifyRequest(): void
     {
-        $captured = null;
-        $fallback = new class ($captured) implements RequestHandlerInterface {
-            public function __construct(private mixed &$captured) {}
-            public function handle(ServerRequestInterface $request): ResponseInterface
-            {
-                $this->captured = $request->getAttribute('injected');
-                return new Response(200);
-            }
-        };
+        $fallback = new RecordingHandler();
 
         $injector = $this->createMiddleware(static function (ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface {
             return $handler->handle($request->withAttribute('injected', 'value'));
@@ -109,7 +106,7 @@ final class MiddlewareDispatcherTest extends TestCase
         $dispatcher->pipe($injector);
         $dispatcher->handle(new ServerRequest('GET', '/'));
 
-        self::assertSame('value', $captured);
+        self::assertSame('value', $fallback->last()->getAttribute('injected'));
     }
 
     public function testPipeAllAddsMultipleMiddleware(): void
@@ -145,10 +142,16 @@ final class MiddlewareDispatcherTest extends TestCase
         };
     }
 
-    private function createMiddleware(callable $fn): MiddlewareInterface
+    /**
+     * @param \Closure(ServerRequestInterface, RequestHandlerInterface): ResponseInterface $fn
+     */
+    private function createMiddleware(\Closure $fn): MiddlewareInterface
     {
         return new class ($fn) implements MiddlewareInterface {
-            public function __construct(private readonly mixed $fn) {}
+            /**
+             * @param \Closure(ServerRequestInterface, RequestHandlerInterface): ResponseInterface $fn
+             */
+            public function __construct(private readonly \Closure $fn) {}
             public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
             {
                 return ($this->fn)($request, $handler);

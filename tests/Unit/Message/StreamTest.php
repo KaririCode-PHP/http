@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace KaririCode\Http\Tests\Unit\Message;
 
 use KaririCode\Http\Message\Stream;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(Stream::class)]
 final class StreamTest extends TestCase
 {
     private string $tmpFile;
@@ -129,9 +131,10 @@ final class StreamTest extends TestCase
         $stream = new Stream($resource);
         $stream->write('x');
         $stream->rewind();
-        $stream->read(1);
 
-        self::assertTrue($stream->eof());
+        self::assertFalse($stream->eof());
+        self::assertSame('x', $stream->read(8192));
+        self::assertTrue($stream->eof(), 'a read that reached the end sets end-of-file');
     }
 
     // ── Capabilities ─────────────────────────────────────────────────────
@@ -221,10 +224,11 @@ final class StreamTest extends TestCase
 
     public function testGetMetadataWithKey(): void
     {
-        $resource = fopen('php://memory', 'r+');
+        $resource = fopen(__FILE__, 'r');
         $stream = new Stream($resource);
 
-        self::assertSame('r+', $stream->getMetadata('mode'));
+        self::assertSame('r', $stream->getMetadata('mode'));
+        self::assertSame(__FILE__, $stream->getMetadata('uri'));
     }
 
     public function testGetMetadataUnknownKeyReturnsNull(): void

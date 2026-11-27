@@ -4,14 +4,22 @@ declare(strict_types=1);
 
 namespace KaririCode\Http\Tests\Unit\Message;
 
-use KaririCode\Http\Message\Stream;
-use KaririCode\Http\Message\Uri;
+use KaririCode\Http\Enum\StatusCode;
+use KaririCode\Http\Message\HttpGrammar;
 use KaririCode\Http\Message\Request;
 use KaririCode\Http\Message\Response;
 use KaririCode\Http\Message\ServerRequest;
-use KaririCode\Http\Enum\StatusCode;
+use KaririCode\Http\Message\Stream;
+use KaririCode\Http\Message\Uri;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(Request::class)]
+#[CoversClass(Response::class)]
+#[CoversClass(Stream::class)]
+#[CoversClass(Uri::class)]
+#[CoversClass(HttpGrammar::class)]
+#[CoversClass(StatusCode::class)]
 final class MessageTest extends TestCase
 {
     // ── Stream ───────────────────────────────────────────────────────────

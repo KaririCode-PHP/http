@@ -6,8 +6,10 @@ namespace KaririCode\Http\Tests\Unit\Message;
 
 use KaririCode\Http\Message\Stream;
 use KaririCode\Http\Message\UploadedFile;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
+#[CoversClass(UploadedFile::class)]
 final class UploadedFileTest extends TestCase
 {
     private string $tmpDir;
@@ -21,7 +23,9 @@ final class UploadedFileTest extends TestCase
     protected function tearDown(): void
     {
         array_map('unlink', glob("{$this->tmpDir}/*") ?: []);
-        @rmdir($this->tmpDir);
+        if (is_dir($this->tmpDir)) {
+            rmdir($this->tmpDir);
+        }
     }
 
     private function createUploadedFile(
